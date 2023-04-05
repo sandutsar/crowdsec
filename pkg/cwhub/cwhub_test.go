@@ -3,7 +3,6 @@ package cwhub
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,7 +25,8 @@ import (
 var responseByPath map[string]string
 
 func TestItemStatus(t *testing.T) {
-	cfg := test_prepenv()
+	cfg := envSetup()
+	defer envTearDown(cfg)
 
 	err := UpdateHubIdx(cfg.Hub)
 	//DownloadHubIdx()
@@ -55,7 +55,7 @@ func TestItemStatus(t *testing.T) {
 		item.Tainted = false
 		txt, _, _, _ := ItemStatus(*item)
 		if txt != "enabled,update-available" {
-			log.Fatalf("got '%s'", txt)
+			t.Fatalf("got '%s'", txt)
 		}
 
 		item.Installed = false
@@ -64,7 +64,7 @@ func TestItemStatus(t *testing.T) {
 		item.Tainted = false
 		txt, _, _, _ = ItemStatus(*item)
 		if txt != "disabled,local" {
-			log.Fatalf("got '%s'", txt)
+			t.Fatalf("got '%s'", txt)
 		}
 
 		break
@@ -73,7 +73,8 @@ func TestItemStatus(t *testing.T) {
 }
 
 func TestGetters(t *testing.T) {
-	cfg := test_prepenv()
+	cfg := envSetup()
+	defer envTearDown(cfg)
 
 	err := UpdateHubIdx(cfg.Hub)
 	//DownloadHubIdx()
@@ -133,8 +134,8 @@ func TestGetters(t *testing.T) {
 }
 
 func TestIndexDownload(t *testing.T) {
-
-	cfg := test_prepenv()
+	cfg := envSetup()
+	defer envTearDown(cfg)
 
 	err := UpdateHubIdx(cfg.Hub)
 	//DownloadHubIdx()
@@ -154,24 +155,17 @@ func getTestCfg() (cfg *csconfig.Config) {
 	return
 }
 
-func test_prepenv() *csconfig.Config {
+func envSetup() *csconfig.Config {
 	resetResponseByPath()
 	log.SetLevel(log.DebugLevel)
 	cfg := getTestCfg()
 	//Mock the http client
 	http.DefaultClient.Transport = newMockTransport()
 
-	if err := os.RemoveAll(cfg.Hub.ConfigDir); err != nil {
-		log.Fatalf("failed to remove %s : %s", cfg.Hub.ConfigDir, err)
-	}
-
 	if err := os.MkdirAll(cfg.Hub.ConfigDir, 0700); err != nil {
 		log.Fatalf("mkdir : %s", err)
 	}
 
-	if err := os.RemoveAll(cfg.Hub.HubDir); err != nil {
-		log.Fatalf("failed to remove %s : %s", cfg.Hub.HubDir, err)
-	}
 	if err := os.MkdirAll(cfg.Hub.HubDir, 0700); err != nil {
 		log.Fatalf("failed to mkdir %s : %s", cfg.Hub.HubDir, err)
 	}
@@ -187,8 +181,19 @@ func test_prepenv() *csconfig.Config {
 	// 	log.Fatalf("failed to mkdir %s : %s", cfg.Hub.InstallDir, err)
 	// }
 	return cfg
-
 }
+
+
+func envTearDown(cfg *csconfig.Config) {
+	if err := os.RemoveAll(cfg.Hub.ConfigDir); err != nil {
+		log.Fatalf("failed to remove %s : %s", cfg.Hub.ConfigDir, err)
+	}
+
+	if err := os.RemoveAll(cfg.Hub.HubDir); err != nil {
+		log.Fatalf("failed to remove %s : %s", cfg.Hub.HubDir, err)
+	}
+}
+
 
 func testInstallItem(cfg *csconfig.Hub, t *testing.T, item Item) {
 
@@ -316,7 +321,8 @@ func TestInstallParser(t *testing.T) {
 	 - check its status
 	 - remove it
 	*/
-	cfg := test_prepenv()
+	cfg := envSetup()
+	defer envTearDown(cfg)
 
 	getHubIdxOrFail(t)
 	//map iteration is random by itself
@@ -347,7 +353,8 @@ func TestInstallCollection(t *testing.T) {
 	 - check its status
 	 - remove it
 	*/
-	cfg := test_prepenv()
+	cfg := envSetup()
+	defer envTearDown(cfg)
 
 	getHubIdxOrFail(t)
 	//map iteration is random by itself
@@ -392,7 +399,7 @@ func (t *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		log.Fatalf("unexpected url :/ %s", req.URL.Path)
 	}
 
-	response.Body = ioutil.NopCloser(strings.NewReader(responseBody))
+	response.Body = io.NopCloser(strings.NewReader(responseBody))
 	return response, nil
 }
 

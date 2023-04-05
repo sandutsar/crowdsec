@@ -13,11 +13,11 @@ import (
 	"unicode"
 
 	"github.com/AlecAivazis/survey/v2"
-	"github.com/crowdsecurity/crowdsec/pkg/metabase"
-
 	"github.com/pbnjay/memory"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+
+	"github.com/crowdsecurity/crowdsec/pkg/metabase"
 )
 
 var (
@@ -66,11 +66,11 @@ cscli dashboard remove
 			metabaseConfigFolderPath := filepath.Join(csConfig.ConfigPaths.ConfigDir, metabaseConfigFolder)
 			metabaseConfigPath = filepath.Join(metabaseConfigFolderPath, metabaseConfigFile)
 			if err := os.MkdirAll(metabaseConfigFolderPath, os.ModePerm); err != nil {
-				log.Fatalf(err.Error())
+				log.Fatal(err)
 			}
 			if err := csConfig.LoadDBConfig(); err != nil {
 				log.Errorf("This command requires direct database access (must be run on the local API machine)")
-				log.Fatalf(err.Error())
+				log.Fatal(err)
 			}
 
 			/*
@@ -87,7 +87,19 @@ cscli dashboard remove
 		},
 	}
 
+	cmdDashboard.AddCommand(NewDashboardSetupCmd())
+	cmdDashboard.AddCommand(NewDashboardStartCmd())
+	cmdDashboard.AddCommand(NewDashboardStopCmd())
+	cmdDashboard.AddCommand(NewDashboardShowPasswordCmd())
+	cmdDashboard.AddCommand(NewDashboardRemoveCmd())
+
+	return cmdDashboard
+}
+
+
+func NewDashboardSetupCmd() *cobra.Command {
 	var force bool
+
 	var cmdDashSetup = &cobra.Command{
 		Use:               "setup",
 		Short:             "Setup a metabase container.",
@@ -170,11 +182,11 @@ cscli dashboard setup -l 0.0.0.0 -p 443 --password <password>
 
 			mb, err := metabase.SetupMetabase(csConfig.API.Server.DbConfig, metabaseListenAddress, metabaseListenPort, metabaseUser, metabasePassword, metabaseDbPath, dockerGroup.Gid, metabaseContainerID)
 			if err != nil {
-				log.Fatalf(err.Error())
+				log.Fatal(err)
 			}
 
 			if err := mb.DumpConfig(metabaseConfigPath); err != nil {
-				log.Fatalf(err.Error())
+				log.Fatal(err)
 			}
 
 			log.Infof("Metabase is ready")
@@ -192,8 +204,10 @@ cscli dashboard setup -l 0.0.0.0 -p 443 --password <password>
 	//cmdDashSetup.Flags().StringVarP(&metabaseUser, "user", "u", "crowdsec@crowdsec.net", "metabase user")
 	cmdDashSetup.Flags().StringVar(&metabasePassword, "password", "", "metabase password")
 
-	cmdDashboard.AddCommand(cmdDashSetup)
+	return cmdDashSetup
+}
 
+func NewDashboardStartCmd() *cobra.Command {
 	var cmdDashStart = &cobra.Command{
 		Use:               "start",
 		Short:             "Start the metabase container.",
@@ -203,7 +217,7 @@ cscli dashboard setup -l 0.0.0.0 -p 443 --password <password>
 		Run: func(cmd *cobra.Command, args []string) {
 			mb, err := metabase.NewMetabase(metabaseConfigPath, metabaseContainerID)
 			if err != nil {
-				log.Fatalf(err.Error())
+				log.Fatal(err)
 			}
 			if err := mb.Container.Start(); err != nil {
 				log.Fatalf("Failed to start metabase container : %s", err)
@@ -212,8 +226,10 @@ cscli dashboard setup -l 0.0.0.0 -p 443 --password <password>
 			log.Infof("url : http://%s:%s", metabaseListenAddress, metabaseListenPort)
 		},
 	}
-	cmdDashboard.AddCommand(cmdDashStart)
+	return cmdDashStart
+}
 
+func NewDashboardStopCmd() *cobra.Command {
 	var cmdDashStop = &cobra.Command{
 		Use:               "stop",
 		Short:             "Stops the metabase container.",
@@ -226,8 +242,11 @@ cscli dashboard setup -l 0.0.0.0 -p 443 --password <password>
 			}
 		},
 	}
-	cmdDashboard.AddCommand(cmdDashStop)
+	return cmdDashStop
+}
 
+
+func NewDashboardShowPasswordCmd() *cobra.Command {
 	var cmdDashShowPassword = &cobra.Command{Use: "show-password",
 		Short:             "displays password of metabase.",
 		Args:              cobra.ExactArgs(0),
@@ -240,7 +259,12 @@ cscli dashboard setup -l 0.0.0.0 -p 443 --password <password>
 			log.Printf("'%s'", m.Config.Password)
 		},
 	}
-	cmdDashboard.AddCommand(cmdDashShowPassword)
+	return cmdDashShowPassword
+}
+
+
+func NewDashboardRemoveCmd() *cobra.Command {
+	var force bool
 
 	var cmdDashRemove = &cobra.Command{
 		Use:               "remove",
@@ -303,9 +327,8 @@ cscli dashboard remove --force
 	}
 	cmdDashRemove.Flags().BoolVarP(&force, "force", "f", false, "Remove also the metabase image")
 	cmdDashRemove.Flags().BoolVarP(&forceYes, "yes", "y", false, "force  yes")
-	cmdDashboard.AddCommand(cmdDashRemove)
 
-	return cmdDashboard
+	return cmdDashRemove
 }
 
 func passwordIsValid(password string) bool {

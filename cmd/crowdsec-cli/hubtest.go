@@ -9,50 +9,64 @@ import (
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
-	"github.com/crowdsecurity/crowdsec/pkg/cstest"
 	"github.com/enescakir/emoji"
-	"github.com/olekukonko/tablewriter"
+	"github.com/fatih/color"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
+
+	"github.com/crowdsecurity/crowdsec/pkg/hubtest"
 )
 
 var (
-	HubTest cstest.HubTest
+	HubTest hubtest.HubTest
 )
 
 func NewHubTestCmd() *cobra.Command {
-	/* ---- HUB COMMAND */
 	var hubPath string
-	var logType string
 	var crowdsecPath string
 	var cscliPath string
 
 	var cmdHubTest = &cobra.Command{
-		Use:   "hubtest",
-		Short: "Run functional tests on hub configurations",
-		Long: `
-		Run functional tests on hub configurations (parsers, scenarios, collections...)
-		`,
+		Use:               "hubtest",
+		Short:             "Run functional tests on hub configurations",
+		Long:              "Run functional tests on hub configurations (parsers, scenarios, collections...)",
 		Args:              cobra.ExactArgs(0),
 		DisableAutoGenTag: true,
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			var err error
-			HubTest, err = cstest.NewHubTest(hubPath, crowdsecPath, cscliPath)
+			HubTest, err = hubtest.NewHubTest(hubPath, crowdsecPath, cscliPath)
 			if err != nil {
-				log.Fatalf("unable to load hubtest: %+v", err)
+				return fmt.Errorf("unable to load hubtest: %+v", err)
 			}
+
+			return nil
 		},
 	}
 	cmdHubTest.PersistentFlags().StringVar(&hubPath, "hub", ".", "Path to hub folder")
 	cmdHubTest.PersistentFlags().StringVar(&crowdsecPath, "crowdsec", "crowdsec", "Path to crowdsec")
 	cmdHubTest.PersistentFlags().StringVar(&cscliPath, "cscli", "cscli", "Path to cscli")
 
+	cmdHubTest.AddCommand(NewHubTestCreateCmd())
+	cmdHubTest.AddCommand(NewHubTestRunCmd())
+	cmdHubTest.AddCommand(NewHubTestCleanCmd())
+	cmdHubTest.AddCommand(NewHubTestInfoCmd())
+	cmdHubTest.AddCommand(NewHubTestListCmd())
+	cmdHubTest.AddCommand(NewHubTestCoverageCmd())
+	cmdHubTest.AddCommand(NewHubTestEvalCmd())
+	cmdHubTest.AddCommand(NewHubTestExplainCmd())
+
+	return cmdHubTest
+}
+
+
+func NewHubTestCreateCmd() *cobra.Command {
 	parsers := []string{}
 	postoverflows := []string{}
 	scenarios := []string{}
 	var ignoreParsers bool
 	var labels map[string]string
+	var logType string
 
 	var cmdHubTestCreate = &cobra.Command{
 		Use:   "create",
@@ -62,19 +76,19 @@ cscli hubtest create my-nginx-custom-test --type nginx
 cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios crowdsecurity/http-probing`,
 		Args:              cobra.ExactArgs(1),
 		DisableAutoGenTag: true,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			testName := args[0]
 			testPath := filepath.Join(HubTest.HubTestPath, testName)
 			if _, err := os.Stat(testPath); os.IsExist(err) {
-				log.Fatalf("test '%s' already exists in '%s', exiting", testName, testPath)
+				return fmt.Errorf("test '%s' already exists in '%s', exiting", testName, testPath)
 			}
 
 			if logType == "" {
-				log.Fatalf("please provide a type (--type) for the test")
+				return fmt.Errorf("please provide a type (--type) for the test")
 			}
 
 			if err := os.MkdirAll(testPath, os.ModePerm); err != nil {
-				log.Fatalf("unable to create folder '%s': %+v", testPath, err)
+				return fmt.Errorf("unable to create folder '%s': %+v", testPath, err)
 			}
 
 			// create empty log file
@@ -82,23 +96,23 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 			logFilePath := filepath.Join(testPath, logFileName)
 			logFile, err := os.Create(logFilePath)
 			if err != nil {
-				log.Fatal(err)
+				return err
 			}
 			logFile.Close()
 
 			// create empty parser assertion file
-			parserAssertFilePath := filepath.Join(testPath, cstest.ParserAssertFileName)
+			parserAssertFilePath := filepath.Join(testPath, hubtest.ParserAssertFileName)
 			parserAssertFile, err := os.Create(parserAssertFilePath)
 			if err != nil {
-				log.Fatal(err)
+				return err
 			}
 			parserAssertFile.Close()
 
 			// create empty scenario assertion file
-			scenarioAssertFilePath := filepath.Join(testPath, cstest.ScenarioAssertFileName)
+			scenarioAssertFilePath := filepath.Join(testPath, hubtest.ScenarioAssertFileName)
 			scenarioAssertFile, err := os.Create(scenarioAssertFilePath)
 			if err != nil {
-				log.Fatal(err)
+				return err
 			}
 			scenarioAssertFile.Close()
 
@@ -113,7 +127,7 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 				postoverflows = append(postoverflows, "")
 			}
 
-			configFileData := &cstest.HubTestItemConfig{
+			configFileData := &hubtest.HubTestItemConfig{
 				Parsers:       parsers,
 				Scenarios:     scenarios,
 				PostOVerflows: postoverflows,
@@ -126,18 +140,18 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 			configFilePath := filepath.Join(testPath, "config.yaml")
 			fd, err := os.OpenFile(configFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
 			if err != nil {
-				log.Fatalf("open: %s", err)
+				return fmt.Errorf("open: %s", err)
 			}
 			data, err := yaml.Marshal(configFileData)
 			if err != nil {
-				log.Fatalf("marshal: %s", err)
+				return fmt.Errorf("marshal: %s", err)
 			}
 			_, err = fd.Write(data)
 			if err != nil {
-				log.Fatalf("write: %s", err)
+				return fmt.Errorf("write: %s", err)
 			}
 			if err := fd.Close(); err != nil {
-				log.Fatalf(" close: %s", err)
+				return fmt.Errorf("close: %s", err)
 			}
 			fmt.Println()
 			fmt.Printf("  Test name                   :  %s\n", testName)
@@ -147,6 +161,7 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 			fmt.Printf("  Scenario assertion file     :  %s (please fill it with assertion)\n", scenarioAssertFilePath)
 			fmt.Printf("  Configuration File          :  %s (please fill it with parsers, scenarios...)\n", configFilePath)
 
+			return nil
 		},
 	}
 	cmdHubTestCreate.PersistentFlags().StringVarP(&logType, "type", "t", "", "Log type of the test")
@@ -154,31 +169,35 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 	cmdHubTestCreate.Flags().StringSliceVar(&postoverflows, "postoverflows", postoverflows, "Postoverflows to add to test")
 	cmdHubTestCreate.Flags().StringSliceVarP(&scenarios, "scenarios", "s", scenarios, "Scenarios to add to test")
 	cmdHubTestCreate.PersistentFlags().BoolVar(&ignoreParsers, "ignore-parsers", false, "Don't run test on parsers")
-	cmdHubTest.AddCommand(cmdHubTestCreate)
 
+	return cmdHubTestCreate
+}
+
+
+func NewHubTestRunCmd() *cobra.Command {
 	var noClean bool
 	var runAll bool
 	var forceClean bool
+
 	var cmdHubTestRun = &cobra.Command{
 		Use:               "run",
 		Short:             "run [test_name]",
 		DisableAutoGenTag: true,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			if !runAll && len(args) == 0 {
 				printHelp(cmd)
-				fmt.Println("Please provide test to run or --all flag")
-				os.Exit(1)
+				return fmt.Errorf("Please provide test to run or --all flag")
 			}
 
 			if runAll {
 				if err := HubTest.LoadAllTests(); err != nil {
-					log.Fatalf("unable to load all tests: %+v", err)
+					return fmt.Errorf("unable to load all tests: %+v", err)
 				}
 			} else {
 				for _, testName := range args {
 					_, err := HubTest.LoadTestItem(testName)
 					if err != nil {
-						log.Fatalf("unable to load test '%s': %s", testName, err)
+						return fmt.Errorf("unable to load test '%s': %s", testName, err)
 					}
 				}
 			}
@@ -193,8 +212,9 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 				}
 			}
 
+			return nil
 		},
-		PersistentPostRun: func(cmd *cobra.Command, args []string) {
+		PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
 			success := true
 			testResult := make(map[string]bool)
 			for _, test := range HubTest.Tests {
@@ -211,7 +231,7 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 					}
 					if !noClean {
 						if err := test.Clean(); err != nil {
-							log.Fatalf("unable to clean test '%s' env: %s", test.Name, err)
+							return fmt.Errorf("unable to clean test '%s' env: %s", test.Name, err)
 						}
 					}
 					fmt.Printf("\nPlease fill your assert file(s) for test '%s', exiting\n", test.Name)
@@ -224,7 +244,7 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 					}
 					if !noClean {
 						if err := test.Clean(); err != nil {
-							log.Fatalf("unable to clean test '%s' env: %s", test.Name, err)
+							return fmt.Errorf("unable to clean test '%s' env: %s", test.Name, err)
 						}
 					}
 				} else {
@@ -261,35 +281,20 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 								Default: true,
 							}
 							if err := survey.AskOne(prompt, &cleanTestEnv); err != nil {
-								log.Fatalf("unable to ask to remove runtime folder: %s", err)
+								return fmt.Errorf("unable to ask to remove runtime folder: %s", err)
 							}
 						}
 					}
 
 					if cleanTestEnv || forceClean {
 						if err := test.Clean(); err != nil {
-							log.Fatalf("unable to clean test '%s' env: %s", test.Name, err)
+							return fmt.Errorf("unable to clean test '%s' env: %s", test.Name, err)
 						}
 					}
 				}
 			}
 			if csConfig.Cscli.Output == "human" {
-				table := tablewriter.NewWriter(os.Stdout)
-				table.SetCenterSeparator("")
-				table.SetColumnSeparator("")
-
-				table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-				table.SetAlignment(tablewriter.ALIGN_LEFT)
-
-				table.SetHeader([]string{"Test", "Result"})
-				for testName, success := range testResult {
-					status := emoji.CheckMarkButton.String()
-					if !success {
-						status = emoji.CrossMark.String()
-					}
-					table.Append([]string{testName, status})
-				}
-				table.Render()
+				hubTestResultTable(color.Output, testResult)
 			} else if csConfig.Cscli.Output == "json" {
 				jsonResult := make(map[string][]string, 0)
 				jsonResult["success"] = make([]string, 0)
@@ -303,7 +308,7 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 				}
 				jsonStr, err := json.Marshal(jsonResult)
 				if err != nil {
-					log.Fatalf("unable to json test result: %s", err.Error())
+					return fmt.Errorf("unable to json test result: %s", err)
 				}
 				fmt.Println(string(jsonStr))
 			}
@@ -311,106 +316,129 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 			if !success {
 				os.Exit(1)
 			}
+
+			return nil
 		},
 	}
 	cmdHubTestRun.Flags().BoolVar(&noClean, "no-clean", false, "Don't clean runtime environment if test succeed")
 	cmdHubTestRun.Flags().BoolVar(&forceClean, "clean", false, "Clean runtime environment if test fail")
 	cmdHubTestRun.Flags().BoolVar(&runAll, "all", false, "Run all tests")
-	cmdHubTest.AddCommand(cmdHubTestRun)
 
+	return cmdHubTestRun
+}
+
+
+func NewHubTestCleanCmd() *cobra.Command {
 	var cmdHubTestClean = &cobra.Command{
 		Use:               "clean",
 		Short:             "clean [test_name]",
 		Args:              cobra.MinimumNArgs(1),
 		DisableAutoGenTag: true,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			for _, testName := range args {
 				test, err := HubTest.LoadTestItem(testName)
 				if err != nil {
-					log.Fatalf("unable to load test '%s': %s", testName, err)
+					return fmt.Errorf("unable to load test '%s': %s", testName, err)
 				}
 				if err := test.Clean(); err != nil {
-					log.Fatalf("unable to clean test '%s' env: %s", test.Name, err)
+					return fmt.Errorf("unable to clean test '%s' env: %s", test.Name, err)
 				}
 			}
+
+			return nil
 		},
 	}
-	cmdHubTest.AddCommand(cmdHubTestClean)
 
+	return cmdHubTestClean
+}
+
+
+func NewHubTestInfoCmd() *cobra.Command {
 	var cmdHubTestInfo = &cobra.Command{
 		Use:               "info",
 		Short:             "info [test_name]",
 		Args:              cobra.MinimumNArgs(1),
 		DisableAutoGenTag: true,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			for _, testName := range args {
 				test, err := HubTest.LoadTestItem(testName)
 				if err != nil {
-					log.Fatalf("unable to load test '%s': %s", testName, err)
+					return fmt.Errorf("unable to load test '%s': %s", testName, err)
 				}
 				fmt.Println()
 				fmt.Printf("  Test name                   :  %s\n", test.Name)
 				fmt.Printf("  Test path                   :  %s\n", test.Path)
 				fmt.Printf("  Log file                    :  %s\n", filepath.Join(test.Path, test.Config.LogFile))
-				fmt.Printf("  Parser assertion file       :  %s\n", filepath.Join(test.Path, cstest.ParserAssertFileName))
-				fmt.Printf("  Scenario assertion file     :  %s\n", filepath.Join(test.Path, cstest.ScenarioAssertFileName))
+				fmt.Printf("  Parser assertion file       :  %s\n", filepath.Join(test.Path, hubtest.ParserAssertFileName))
+				fmt.Printf("  Scenario assertion file     :  %s\n", filepath.Join(test.Path, hubtest.ScenarioAssertFileName))
 				fmt.Printf("  Configuration File          :  %s\n", filepath.Join(test.Path, "config.yaml"))
 			}
+
+			return nil
 		},
 	}
-	cmdHubTest.AddCommand(cmdHubTestInfo)
 
+	return cmdHubTestInfo
+}
+
+
+func NewHubTestListCmd() *cobra.Command {
 	var cmdHubTestList = &cobra.Command{
 		Use:               "list",
 		Short:             "list",
 		DisableAutoGenTag: true,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := HubTest.LoadAllTests(); err != nil {
-				log.Fatalf("unable to load all tests: %+v", err)
+				return fmt.Errorf("unable to load all tests: %s", err)
 			}
 
-			table := tablewriter.NewWriter(os.Stdout)
-			table.SetCenterSeparator("")
-			table.SetColumnSeparator("")
-
-			table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-			table.SetAlignment(tablewriter.ALIGN_LEFT)
-			table.SetHeader([]string{"Name", "Path"})
-			for _, test := range HubTest.Tests {
-				table.Append([]string{test.Name, test.Path})
+			switch csConfig.Cscli.Output {
+			case "human":
+				hubTestListTable(color.Output, HubTest.Tests)
+			case "json":
+				j, err := json.MarshalIndent(HubTest.Tests, " ", "  ")
+				if err != nil {
+					return err
+				}
+				fmt.Println(string(j))
+			default:
+				return fmt.Errorf("only human/json output modes are supported")
 			}
-			table.Render()
 
+			return nil
 		},
 	}
-	cmdHubTest.AddCommand(cmdHubTestList)
 
+	return cmdHubTestList
+}
+
+
+func NewHubTestCoverageCmd() *cobra.Command {
 	var showParserCov bool
 	var showScenarioCov bool
 	var showOnlyPercent bool
+
 	var cmdHubTestCoverage = &cobra.Command{
 		Use:               "coverage",
 		Short:             "coverage",
 		DisableAutoGenTag: true,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := HubTest.LoadAllTests(); err != nil {
-				log.Fatalf("unable to load all tests: %+v", err)
+				return fmt.Errorf("unable to load all tests: %+v", err)
 			}
 			var err error
-			scenarioCoverage := []cstest.ScenarioCoverage{}
-			parserCoverage := []cstest.ParserCoverage{}
+			scenarioCoverage := []hubtest.ScenarioCoverage{}
+			parserCoverage := []hubtest.ParserCoverage{}
 			scenarioCoveragePercent := 0
 			parserCoveragePercent := 0
-			showAll := false
 
-			if !showScenarioCov && !showParserCov { // if both are false (flag by default), show both
-				showAll = true
-			}
+			// if both are false (flag by default), show both
+			showAll := !showScenarioCov && !showParserCov
 
 			if showParserCov || showAll {
 				parserCoverage, err = HubTest.GetParsersCoverage()
 				if err != nil {
-					log.Fatalf("while getting parser coverage : %s", err)
+					return fmt.Errorf("while getting parser coverage: %s", err)
 				}
 				parserTested := 0
 				for _, test := range parserCoverage {
@@ -424,7 +452,7 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 			if showScenarioCov || showAll {
 				scenarioCoverage, err = HubTest.GetScenariosCoverage()
 				if err != nil {
-					log.Fatalf("while getting scenario coverage: %s", err)
+					return fmt.Errorf("while getting scenario coverage: %s", err)
 				}
 				scenarioTested := 0
 				for _, test := range scenarioCoverage {
@@ -448,43 +476,11 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 
 			if csConfig.Cscli.Output == "human" {
 				if showParserCov || showAll {
-					table := tablewriter.NewWriter(os.Stdout)
-					table.SetCenterSeparator("")
-					table.SetColumnSeparator("")
-
-					table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-					table.SetAlignment(tablewriter.ALIGN_LEFT)
-
-					table.SetHeader([]string{"Parser", "Status", "Number of tests"})
-					parserTested := 0
-					for _, test := range parserCoverage {
-						status := emoji.RedCircle.String()
-						if test.TestsCount > 0 {
-							status = emoji.GreenCircle.String()
-							parserTested += 1
-						}
-						table.Append([]string{test.Parser, status, fmt.Sprintf("%d times (across %d tests)", test.TestsCount, len(test.PresentIn))})
-					}
-					table.Render()
+					hubTestParserCoverageTable(color.Output, parserCoverage)
 				}
 
 				if showScenarioCov || showAll {
-					table := tablewriter.NewWriter(os.Stdout)
-					table.SetCenterSeparator("")
-					table.SetColumnSeparator("")
-
-					table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-					table.SetAlignment(tablewriter.ALIGN_LEFT)
-
-					table.SetHeader([]string{"Scenario", "Status", "Number of tests"})
-					for _, test := range scenarioCoverage {
-						status := emoji.RedCircle.String()
-						if test.TestsCount > 0 {
-							status = emoji.GreenCircle.String()
-						}
-						table.Append([]string{test.Scenario, status, fmt.Sprintf("%d times (across %d tests)", test.TestsCount, len(test.PresentIn))})
-					}
-					table.Render()
+					hubTestScenarioCoverageTable(color.Output, scenarioCoverage)
 				}
 				fmt.Println()
 				if showParserCov || showAll {
@@ -496,72 +492,83 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 			} else if csConfig.Cscli.Output == "json" {
 				dump, err := json.MarshalIndent(parserCoverage, "", " ")
 				if err != nil {
-					log.Fatal(err)
+					return err
 				}
 				fmt.Printf("%s", dump)
 				dump, err = json.MarshalIndent(scenarioCoverage, "", " ")
 				if err != nil {
-					log.Fatal(err)
+					return err
 				}
 				fmt.Printf("%s", dump)
 			} else {
-				log.Fatalf("only human/json output modes are supported")
+				return fmt.Errorf("only human/json output modes are supported")
 			}
 
+			return nil
 		},
 	}
 	cmdHubTestCoverage.PersistentFlags().BoolVar(&showOnlyPercent, "percent", false, "Show only percentages of coverage")
 	cmdHubTestCoverage.PersistentFlags().BoolVar(&showParserCov, "parsers", false, "Show only parsers coverage")
 	cmdHubTestCoverage.PersistentFlags().BoolVar(&showScenarioCov, "scenarios", false, "Show only scenarios coverage")
-	cmdHubTest.AddCommand(cmdHubTestCoverage)
 
+	return cmdHubTestCoverage
+}
+
+
+func NewHubTestEvalCmd() *cobra.Command {
 	var evalExpression string
 	var cmdHubTestEval = &cobra.Command{
 		Use:               "eval",
 		Short:             "eval [test_name]",
 		Args:              cobra.ExactArgs(1),
 		DisableAutoGenTag: true,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			for _, testName := range args {
 				test, err := HubTest.LoadTestItem(testName)
 				if err != nil {
-					log.Fatalf("can't load test: %+v", err)
+					return fmt.Errorf("can't load test: %+v", err)
 				}
 				err = test.ParserAssert.LoadTest(test.ParserResultFile)
 				if err != nil {
-					log.Fatalf("can't load test results from '%s': %+v", test.ParserResultFile, err)
+					return fmt.Errorf("can't load test results from '%s': %+v", test.ParserResultFile, err)
 				}
 				output, err := test.ParserAssert.EvalExpression(evalExpression)
 				if err != nil {
-					log.Fatalf(err.Error())
+					return err
 				}
-				fmt.Printf(output)
+				fmt.Print(output)
 			}
+
+			return nil
 		},
 	}
 	cmdHubTestEval.PersistentFlags().StringVarP(&evalExpression, "expr", "e", "", "Expression to eval")
-	cmdHubTest.AddCommand(cmdHubTestEval)
 
+	return cmdHubTestEval
+}
+
+
+func NewHubTestExplainCmd() *cobra.Command {
 	var cmdHubTestExplain = &cobra.Command{
 		Use:               "explain",
 		Short:             "explain [test_name]",
 		Args:              cobra.ExactArgs(1),
 		DisableAutoGenTag: true,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			for _, testName := range args {
 				test, err := HubTest.LoadTestItem(testName)
 				if err != nil {
-					log.Fatalf("can't load test: %+v", err)
+					return fmt.Errorf("can't load test: %+v", err)
 				}
 				err = test.ParserAssert.LoadTest(test.ParserResultFile)
 				if err != nil {
 					err := test.Run()
 					if err != nil {
-						log.Fatalf("running test '%s' failed: %+v", test.Name, err)
+						return fmt.Errorf("running test '%s' failed: %+v", test.Name, err)
 					}
 					err = test.ParserAssert.LoadTest(test.ParserResultFile)
 					if err != nil {
-						log.Fatalf("unable to load parser result after run: %s", err)
+						return fmt.Errorf("unable to load parser result after run: %s", err)
 					}
 				}
 
@@ -569,19 +576,20 @@ cscli hubtest create my-scenario-test --parsers crowdsecurity/nginx --scenarios 
 				if err != nil {
 					err := test.Run()
 					if err != nil {
-						log.Fatalf("running test '%s' failed: %+v", test.Name, err)
+						return fmt.Errorf("running test '%s' failed: %+v", test.Name, err)
 					}
 					err = test.ScenarioAssert.LoadTest(test.ScenarioResultFile, test.BucketPourResultFile)
 					if err != nil {
-						log.Fatalf("unable to load scenario result after run: %s", err)
+						return fmt.Errorf("unable to load scenario result after run: %s", err)
 					}
 				}
-				opts := cstest.DumpOpts{}
-				cstest.DumpTree(*test.ParserAssert.TestData, *test.ScenarioAssert.PourData, opts)
+				opts := hubtest.DumpOpts{}
+				hubtest.DumpTree(*test.ParserAssert.TestData, *test.ScenarioAssert.PourData, opts)
 			}
+
+			return nil
 		},
 	}
-	cmdHubTest.AddCommand(cmdHubTestExplain)
 
-	return cmdHubTest
+	return cmdHubTestExplain
 }

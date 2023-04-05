@@ -11,7 +11,7 @@ import (
 
 /*
  PluginWatcher is here to allow grouping and threshold features for notification plugins :
- by frequency : it will signal the plugin to deliver notifications at this frequence (watchPluginTicker)
+ by frequency : it will signal the plugin to deliver notifications at this frequency (watchPluginTicker)
  by threshold : it will signal the plugin to deliver notifications when the number of alerts for this plugin reaches this threshold (watchPluginAlertCounts)
 */
 
@@ -82,7 +82,7 @@ func (pw *PluginWatcher) Start(tomb *tomb.Tomb) {
 
 func (pw *PluginWatcher) watchPluginTicker(pluginName string) {
 	var watchTime time.Duration
-	var watchCount int = -1
+	watchCount := -1
 	// Threshold can be set : by time, by count, or both
 	// if only time is set, honor it
 	// if only count is set, put timer to 1 second and just check size
@@ -108,7 +108,7 @@ func (pw *PluginWatcher) watchPluginTicker(pluginName string) {
 	}
 
 	ticker := time.NewTicker(watchTime)
-	var lastSend time.Time = time.Now()
+	lastSend := time.Now()
 	for {
 		select {
 		case <-ticker.C:
@@ -139,6 +139,9 @@ func (pw *PluginWatcher) watchPluginTicker(pluginName string) {
 			}
 		case <-pw.tomb.Dying():
 			ticker.Stop()
+			// emptying
+			// no lock here because we have the broker still listening even in dying state before killing us
+			pw.PluginEvents <- pluginName
 			return
 		}
 	}

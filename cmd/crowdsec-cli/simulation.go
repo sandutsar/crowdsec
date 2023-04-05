@@ -2,12 +2,13 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
+	"os"
 
-	"github.com/crowdsecurity/crowdsec/pkg/cwhub"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
+
+	"github.com/crowdsecurity/crowdsec/pkg/cwhub"
 )
 
 func addToExclusion(name string) error {
@@ -32,7 +33,7 @@ func enableGlobalSimulation() error {
 	csConfig.Cscli.SimulationConfig.Exclusions = []string{}
 
 	if err := dumpSimulationFile(); err != nil {
-		log.Fatalf("unable to dump simulation file: %s", err.Error())
+		log.Fatalf("unable to dump simulation file: %s", err)
 	}
 
 	log.Printf("global simulation: enabled")
@@ -45,7 +46,7 @@ func dumpSimulationFile() error {
 	if err != nil {
 		return fmt.Errorf("unable to marshal simulation configuration: %s", err)
 	}
-	err = ioutil.WriteFile(csConfig.ConfigPaths.SimulationFilePath, newConfigSim, 0644)
+	err = os.WriteFile(csConfig.ConfigPaths.SimulationFilePath, newConfigSim, 0644)
 	if err != nil {
 		return fmt.Errorf("write simulation config in '%s' failed: %s", csConfig.ConfigPaths.SimulationFilePath, err)
 	}
@@ -63,7 +64,7 @@ func disableGlobalSimulation() error {
 	if err != nil {
 		return fmt.Errorf("unable to marshal new simulation configuration: %s", err)
 	}
-	err = ioutil.WriteFile(csConfig.ConfigPaths.SimulationFilePath, newConfigSim, 0644)
+	err = os.WriteFile(csConfig.ConfigPaths.SimulationFilePath, newConfigSim, 0644)
 	if err != nil {
 		return fmt.Errorf("unable to write new simulation config in '%s' : %s", csConfig.ConfigPaths.SimulationFilePath, err)
 	}
@@ -107,7 +108,7 @@ cscli simulation disable crowdsecurity/ssh-bf`,
 		DisableAutoGenTag: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if err := csConfig.LoadSimulation(); err != nil {
-				log.Fatalf(err.Error())
+				log.Fatal(err)
 			}
 			if csConfig.Cscli == nil {
 				return fmt.Errorf("you must configure cli before using simulation")
@@ -126,7 +127,16 @@ cscli simulation disable crowdsecurity/ssh-bf`,
 	cmdSimulation.Flags().SortFlags = false
 	cmdSimulation.PersistentFlags().SortFlags = false
 
+	cmdSimulation.AddCommand(NewSimulationEnableCmd())
+	cmdSimulation.AddCommand(NewSimulationDisableCmd())
+	cmdSimulation.AddCommand(NewSimulationStatusCmd())
+
+	return cmdSimulation
+}
+
+func NewSimulationEnableCmd() *cobra.Command {
 	var forceGlobalSimulation bool
+
 	var cmdSimulationEnable = &cobra.Command{
 		Use:               "enable [scenario] [-global]",
 		Short:             "Enable the simulation, globally or on specified scenarios",
@@ -134,11 +144,11 @@ cscli simulation disable crowdsecurity/ssh-bf`,
 		DisableAutoGenTag: true,
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := csConfig.LoadHub(); err != nil {
-				log.Fatalf(err.Error())
+				log.Fatal(err)
 			}
 			if err := cwhub.GetHubIdx(csConfig.Hub); err != nil {
+				log.Info("Run 'sudo cscli hub update' to get the hub index")
 				log.Fatalf("Failed to get Hub index : %v", err)
-				log.Infoln("Run 'sudo cscli hub update' to get the hub index")
 			}
 
 			if len(args) > 0 {
@@ -153,7 +163,7 @@ cscli simulation disable crowdsecurity/ssh-bf`,
 					}
 					isExcluded := inSlice(scenario, csConfig.Cscli.SimulationConfig.Exclusions)
 					if *csConfig.Cscli.SimulationConfig.Simulation && !isExcluded {
-						log.Warningf("global simulation is already enabled")
+						log.Warning("global simulation is already enabled")
 						continue
 					}
 					if !*csConfig.Cscli.SimulationConfig.Simulation && isExcluded {
@@ -162,22 +172,22 @@ cscli simulation disable crowdsecurity/ssh-bf`,
 					}
 					if *csConfig.Cscli.SimulationConfig.Simulation && isExcluded {
 						if err := removeFromExclusion(scenario); err != nil {
-							log.Fatalf(err.Error())
+							log.Fatal(err)
 						}
 						log.Printf("simulation enabled for '%s'", scenario)
 						continue
 					}
 					if err := addToExclusion(scenario); err != nil {
-						log.Fatalf(err.Error())
+						log.Fatal(err)
 					}
 					log.Printf("simulation mode for '%s' enabled", scenario)
 				}
 				if err := dumpSimulationFile(); err != nil {
-					log.Fatalf("simulation enable: %s", err.Error())
+					log.Fatalf("simulation enable: %s", err)
 				}
 			} else if forceGlobalSimulation {
 				if err := enableGlobalSimulation(); err != nil {
-					log.Fatalf("unable to enable global simulation mode : %s", err.Error())
+					log.Fatalf("unable to enable global simulation mode : %s", err)
 				}
 			} else {
 				printHelp(cmd)
@@ -185,7 +195,12 @@ cscli simulation disable crowdsecurity/ssh-bf`,
 		},
 	}
 	cmdSimulationEnable.Flags().BoolVarP(&forceGlobalSimulation, "global", "g", false, "Enable global simulation (reverse mode)")
-	cmdSimulation.AddCommand(cmdSimulationEnable)
+
+	return cmdSimulationEnable
+}
+
+func NewSimulationDisableCmd() *cobra.Command {
+	var forceGlobalSimulation bool
 
 	var cmdSimulationDisable = &cobra.Command{
 		Use:               "disable [scenario]",
@@ -202,7 +217,7 @@ cscli simulation disable crowdsecurity/ssh-bf`,
 					}
 					if !*csConfig.Cscli.SimulationConfig.Simulation && isExcluded {
 						if err := removeFromExclusion(scenario); err != nil {
-							log.Fatalf(err.Error())
+							log.Fatal(err)
 						}
 						log.Printf("simulation mode for '%s' disabled", scenario)
 						continue
@@ -212,16 +227,16 @@ cscli simulation disable crowdsecurity/ssh-bf`,
 						continue
 					}
 					if err := addToExclusion(scenario); err != nil {
-						log.Fatalf(err.Error())
+						log.Fatal(err)
 					}
 					log.Printf("simulation mode for '%s' disabled", scenario)
 				}
 				if err := dumpSimulationFile(); err != nil {
-					log.Fatalf("simulation disable: %s", err.Error())
+					log.Fatalf("simulation disable: %s", err)
 				}
 			} else if forceGlobalSimulation {
 				if err := disableGlobalSimulation(); err != nil {
-					log.Fatalf("unable to disable global simulation mode : %s", err.Error())
+					log.Fatalf("unable to disable global simulation mode : %s", err)
 				}
 			} else {
 				printHelp(cmd)
@@ -229,8 +244,11 @@ cscli simulation disable crowdsecurity/ssh-bf`,
 		},
 	}
 	cmdSimulationDisable.Flags().BoolVarP(&forceGlobalSimulation, "global", "g", false, "Disable global simulation (reverse mode)")
-	cmdSimulation.AddCommand(cmdSimulationDisable)
 
+	return cmdSimulationDisable
+}
+
+func NewSimulationStatusCmd() *cobra.Command {
 	var cmdSimulationStatus = &cobra.Command{
 		Use:               "status",
 		Short:             "Show simulation mode status",
@@ -238,13 +256,12 @@ cscli simulation disable crowdsecurity/ssh-bf`,
 		DisableAutoGenTag: true,
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := simulationStatus(); err != nil {
-				log.Fatalf(err.Error())
+				log.Fatal(err)
 			}
 		},
 		PersistentPostRun: func(cmd *cobra.Command, args []string) {
 		},
 	}
-	cmdSimulation.AddCommand(cmdSimulationStatus)
 
-	return cmdSimulation
+	return cmdSimulationStatus
 }

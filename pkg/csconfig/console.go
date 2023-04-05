@@ -2,9 +2,9 @@ package csconfig
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 
+	"github.com/crowdsecurity/crowdsec/pkg/fflag"
 	"github.com/crowdsecurity/crowdsec/pkg/types"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
@@ -15,9 +15,11 @@ const (
 	SEND_CUSTOM_SCENARIOS  = "custom"
 	SEND_TAINTED_SCENARIOS = "tainted"
 	SEND_MANUAL_SCENARIOS  = "manual"
+	CONSOLE_MANAGEMENT     = "console_management"
+	SEND_CONTEXT           = "context"
 )
 
-var CONSOLE_CONFIGS = []string{SEND_CUSTOM_SCENARIOS, SEND_MANUAL_SCENARIOS, SEND_TAINTED_SCENARIOS}
+var CONSOLE_CONFIGS = []string{SEND_CUSTOM_SCENARIOS, SEND_MANUAL_SCENARIOS, SEND_TAINTED_SCENARIOS, SEND_CONTEXT, CONSOLE_MANAGEMENT}
 
 var DefaultConsoleConfigFilePath = DefaultConfigPath("console.yaml")
 
@@ -25,6 +27,8 @@ type ConsoleConfig struct {
 	ShareManualDecisions  *bool `yaml:"share_manual_decisions"`
 	ShareTaintedScenarios *bool `yaml:"share_tainted"`
 	ShareCustomScenarios  *bool `yaml:"share_custom"`
+	ConsoleManagement     *bool `yaml:"console_management"`
+	ShareContext          *bool `yaml:"share_context"`
 }
 
 func (c *LocalApiServerCfg) LoadConsoleConfig() error {
@@ -34,10 +38,12 @@ func (c *LocalApiServerCfg) LoadConsoleConfig() error {
 		c.ConsoleConfig.ShareCustomScenarios = types.BoolPtr(true)
 		c.ConsoleConfig.ShareTaintedScenarios = types.BoolPtr(true)
 		c.ConsoleConfig.ShareManualDecisions = types.BoolPtr(false)
+		c.ConsoleConfig.ConsoleManagement = types.BoolPtr(false)
+		c.ConsoleConfig.ShareContext = types.BoolPtr(false)
 		return nil
 	}
 
-	yamlFile, err := ioutil.ReadFile(c.ConsoleConfigPath)
+	yamlFile, err := os.ReadFile(c.ConsoleConfigPath)
 	if err != nil {
 		return fmt.Errorf("reading console config file '%s': %s", c.ConsoleConfigPath, err)
 	}
@@ -58,6 +64,19 @@ func (c *LocalApiServerCfg) LoadConsoleConfig() error {
 		log.Debugf("no share_manual scenarios found, setting to false")
 		c.ConsoleConfig.ShareManualDecisions = types.BoolPtr(false)
 	}
+
+	if !fflag.PapiClient.IsEnabled() {
+		c.ConsoleConfig.ConsoleManagement = types.BoolPtr(false)
+	} else if c.ConsoleConfig.ConsoleManagement == nil {
+		log.Debugf("no console_management found, setting to false")
+		c.ConsoleConfig.ConsoleManagement = types.BoolPtr(false)
+	}
+
+	if c.ConsoleConfig.ShareContext == nil {
+		log.Debugf("no 'context' found, setting to false")
+		c.ConsoleConfig.ShareContext = types.BoolPtr(false)
+	}
+
 	log.Debugf("Console configuration '%s' loaded successfully", c.ConsoleConfigPath)
 
 	return nil

@@ -12,31 +12,25 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fatih/color"
+	"github.com/go-openapi/strfmt"
+	"github.com/jszwec/csvutil"
+	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
+	"github.com/spf13/cobra"
+
 	"github.com/crowdsecurity/crowdsec/pkg/apiclient"
 	"github.com/crowdsecurity/crowdsec/pkg/cwversion"
 	"github.com/crowdsecurity/crowdsec/pkg/models"
 	"github.com/crowdsecurity/crowdsec/pkg/types"
-	"github.com/go-openapi/strfmt"
-	"github.com/jszwec/csvutil"
-	"github.com/olekukonko/tablewriter"
-	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
-	"github.com/spf13/cobra"
 )
 
 var Client *apiclient.ApiClient
 
-var (
-	defaultDuration = "4h"
-	defaultScope    = "ip"
-	defaultType     = "ban"
-	defaultReason   = "manual"
-)
-
 func DecisionsToTable(alerts *models.GetAlertsResponse, printMachine bool) error {
 	/*here we cheat a bit : to make it more readable for the user, we dedup some entries*/
-	var spamLimit map[string]bool = make(map[string]bool)
-	var skipped = 0
+	spamLimit := make(map[string]bool)
+	skipped := 0
 
 	for aIdx := 0; aIdx < len(*alerts); aIdx++ {
 		alertItem := (*alerts)[aIdx]
@@ -71,7 +65,7 @@ func DecisionsToTable(alerts *models.GetAlertsResponse, printMachine bool) error
 					*decisionItem.Scenario,
 					*decisionItem.Type,
 					alertItem.Source.Cn,
-					alertItem.Source.AsNumber + " " + alertItem.Source.AsName,
+					alertItem.Source.GetAsNumberName(),
 					fmt.Sprintf("%d", *alertItem.EventsCount),
 					*decisionItem.Duration,
 					fmt.Sprintf("%t", *decisionItem.Simulated),
@@ -92,44 +86,11 @@ func DecisionsToTable(alerts *models.GetAlertsResponse, printMachine bool) error
 		x, _ := json.MarshalIndent(alerts, "", " ")
 		fmt.Printf("%s", string(x))
 	} else if csConfig.Cscli.Output == "human" {
-		table := tablewriter.NewWriter(os.Stdout)
-		header := []string{"ID", "Source", "Scope:Value", "Reason", "Action", "Country", "AS", "Events", "expiration", "Alert ID"}
-		if printMachine {
-			header = append(header, "Machine")
-		}
-		table.SetHeader(header)
-
 		if len(*alerts) == 0 {
 			fmt.Println("No active decisions")
 			return nil
 		}
-
-		for _, alertItem := range *alerts {
-			for _, decisionItem := range alertItem.Decisions {
-				if *alertItem.Simulated {
-					*decisionItem.Type = fmt.Sprintf("(simul)%s", *decisionItem.Type)
-				}
-				raw := []string{
-					strconv.Itoa(int(decisionItem.ID)),
-					*decisionItem.Origin,
-					*decisionItem.Scope + ":" + *decisionItem.Value,
-					*decisionItem.Scenario,
-					*decisionItem.Type,
-					alertItem.Source.Cn,
-					alertItem.Source.AsNumber + " " + alertItem.Source.AsName,
-					strconv.Itoa(int(*alertItem.EventsCount)),
-					*decisionItem.Duration,
-					strconv.Itoa(int(alertItem.ID)),
-				}
-
-				if printMachine {
-					raw = append(raw, alertItem.MachineID)
-				}
-
-				table.Append(raw)
-			}
-		}
-		table.Render() // Send output
+		decisionsTable(color.Output, alerts, printMachine)
 		if skipped > 0 {
 			fmt.Printf("%d duplicated entries skipped\n", skipped)
 		}
@@ -138,7 +99,6 @@ func DecisionsToTable(alerts *models.GetAlertsResponse, printMachine bool) error
 }
 
 func NewDecisionsCmd() *cobra.Command {
-	/* ---- DECISIONS COMMAND */
 	var cmdDecisions = &cobra.Command{
 		Use:     "decisions [action]",
 		Short:   "Manage decisions",
@@ -171,6 +131,15 @@ func NewDecisionsCmd() *cobra.Command {
 		},
 	}
 
+	cmdDecisions.AddCommand(NewDecisionsListCmd())
+	cmdDecisions.AddCommand(NewDecisionsAddCmd())
+	cmdDecisions.AddCommand(NewDecisionsDeleteCmd())
+	cmdDecisions.AddCommand(NewDecisionsImportCmd())
+
+	return cmdDecisions
+}
+
+func NewDecisionsListCmd() *cobra.Command {
 	var filter = apiclient.AlertsListOpts{
 		ValueEquals:    new(string),
 		ScopeEquals:    new(string),
@@ -187,6 +156,7 @@ func NewDecisionsCmd() *cobra.Command {
 	NoSimu := new(bool)
 	contained := new(bool)
 	var printMachine bool
+
 	var cmdDecisionsList = &cobra.Command{
 		Use:   "list [options]",
 		Short: "List decisions from LAPI",
@@ -211,31 +181,28 @@ cscli decisions list -t ban
 			/* nullify the empty entries to avoid bad filter */
 			if *filter.Until == "" {
 				filter.Until = nil
-			} else {
+			} else if strings.HasSuffix(*filter.Until, "d") {
 				/*time.ParseDuration support hours 'h' as bigger unit, let's make the user's life easier*/
-				if strings.HasSuffix(*filter.Until, "d") {
-					realDuration := strings.TrimSuffix(*filter.Until, "d")
-					days, err := strconv.Atoi(realDuration)
-					if err != nil {
-						printHelp(cmd)
-						log.Fatalf("Can't parse duration %s, valid durations format: 1d, 4h, 4h15m", *filter.Until)
-					}
-					*filter.Until = fmt.Sprintf("%d%s", days*24, "h")
+				realDuration := strings.TrimSuffix(*filter.Until, "d")
+				days, err := strconv.Atoi(realDuration)
+				if err != nil {
+					printHelp(cmd)
+					log.Fatalf("Can't parse duration %s, valid durations format: 1d, 4h, 4h15m", *filter.Until)
 				}
+				*filter.Until = fmt.Sprintf("%d%s", days*24, "h")
 			}
+
 			if *filter.Since == "" {
 				filter.Since = nil
-			} else {
+			} else if strings.HasSuffix(*filter.Since, "d") {
 				/*time.ParseDuration support hours 'h' as bigger unit, let's make the user's life easier*/
-				if strings.HasSuffix(*filter.Since, "d") {
-					realDuration := strings.TrimSuffix(*filter.Since, "d")
-					days, err := strconv.Atoi(realDuration)
-					if err != nil {
-						printHelp(cmd)
-						log.Fatalf("Can't parse duration %s, valid durations format: 1d, 4h, 4h15m", *filter.Until)
-					}
-					*filter.Since = fmt.Sprintf("%d%s", days*24, "h")
+				realDuration := strings.TrimSuffix(*filter.Since, "d")
+				days, err := strconv.Atoi(realDuration)
+				if err != nil {
+					printHelp(cmd)
+					log.Fatalf("Can't parse duration %s, valid durations format: 1d, 4h, 4h15m", *filter.Until)
 				}
+				*filter.Since = fmt.Sprintf("%d%s", days*24, "h")
 			}
 			if *filter.IncludeCAPI {
 				*filter.Limit = 0
@@ -269,12 +236,12 @@ cscli decisions list -t ban
 
 			alerts, _, err := Client.Alerts.List(context.Background(), filter)
 			if err != nil {
-				log.Fatalf("Unable to list decisions : %v", err.Error())
+				log.Fatalf("Unable to list decisions : %v", err)
 			}
 
 			err = DecisionsToTable(alerts, printMachine)
 			if err != nil {
-				log.Fatalf("unable to list decisions : %v", err.Error())
+				log.Fatalf("unable to list decisions : %v", err)
 			}
 		},
 	}
@@ -284,7 +251,7 @@ cscli decisions list -t ban
 	cmdDecisionsList.Flags().StringVar(filter.Until, "until", "", "restrict to alerts older than until (ie. 4h, 30d)")
 	cmdDecisionsList.Flags().StringVarP(filter.TypeEquals, "type", "t", "", "restrict to this decision type (ie. ban,captcha)")
 	cmdDecisionsList.Flags().StringVar(filter.ScopeEquals, "scope", "", "restrict to this scope (ie. ip,range,session)")
-	cmdDecisionsList.Flags().StringVar(filter.OriginEquals, "origin", "", "restrict to this origin (ie. lists,CAPI,cscli)")
+	cmdDecisionsList.Flags().StringVar(filter.OriginEquals, "origin", "", fmt.Sprintf("the value to match for the specified origin (%s ...)", strings.Join(types.GetOrigins(), ",")))
 	cmdDecisionsList.Flags().StringVarP(filter.ValueEquals, "value", "v", "", "restrict to this value (ie. 1.2.3.4,userName)")
 	cmdDecisionsList.Flags().StringVarP(filter.ScenarioEquals, "scenario", "s", "", "restrict to this scenario (ie. crowdsecurity/ssh-bf)")
 	cmdDecisionsList.Flags().StringVarP(filter.IPEquals, "ip", "i", "", "restrict to alerts from this source ip (shorthand for --scope ip --value <IP>)")
@@ -294,8 +261,10 @@ cscli decisions list -t ban
 	cmdDecisionsList.Flags().BoolVarP(&printMachine, "machine", "m", false, "print machines that triggered decisions")
 	cmdDecisionsList.Flags().BoolVar(contained, "contained", false, "query decisions contained by range")
 
-	cmdDecisions.AddCommand(cmdDecisionsList)
+	return cmdDecisionsList
+}
 
+func NewDecisionsAddCmd() *cobra.Command {
 	var (
 		addIP       string
 		addRange    string
@@ -319,9 +288,8 @@ cscli decisions add --scope username --value foobar
 		DisableAutoGenTag: true,
 		Run: func(cmd *cobra.Command, args []string) {
 			var err error
-			var ipRange string
 			alerts := models.AddAlertsRequest{}
-			origin := "cscli"
+			origin := types.CscliOrigin
 			capacity := int32(0)
 			leakSpeed := "0"
 			eventsCount := int32(1)
@@ -369,12 +337,13 @@ cscli decisions add --scope username --value foobar
 				Scenario:        &addReason,
 				ScenarioVersion: &empty,
 				Simulated:       &simulated,
+				//setting empty scope/value broke plugins, and it didn't seem to be needed anymore w/ latest papi changes
 				Source: &models.Source{
 					AsName:   empty,
 					AsNumber: empty,
 					Cn:       empty,
 					IP:       addValue,
-					Range:    ipRange,
+					Range:    "",
 					Scope:    &addScope,
 					Value:    &addValue,
 				},
@@ -386,7 +355,7 @@ cscli decisions add --scope username --value foobar
 
 			_, _, err = Client.Alerts.Add(context.Background(), alerts)
 			if err != nil {
-				log.Fatalf(err.Error())
+				log.Fatal(err)
 			}
 
 			log.Info("Decision successfully added")
@@ -401,17 +370,24 @@ cscli decisions add --scope username --value foobar
 	cmdDecisionsAdd.Flags().StringVar(&addScope, "scope", types.Ip, "Decision scope (ie. ip,range,username)")
 	cmdDecisionsAdd.Flags().StringVarP(&addReason, "reason", "R", "", "Decision reason (ie. scenario-name)")
 	cmdDecisionsAdd.Flags().StringVarP(&addType, "type", "t", "ban", "Decision type (ie. ban,captcha,throttle)")
-	cmdDecisions.AddCommand(cmdDecisionsAdd)
 
+	return cmdDecisionsAdd
+}
+
+func NewDecisionsDeleteCmd() *cobra.Command {
 	var delFilter = apiclient.DecisionsDeleteOpts{
-		ScopeEquals: new(string),
-		ValueEquals: new(string),
-		TypeEquals:  new(string),
-		IPEquals:    new(string),
-		RangeEquals: new(string),
+		ScopeEquals:    new(string),
+		ValueEquals:    new(string),
+		TypeEquals:     new(string),
+		IPEquals:       new(string),
+		RangeEquals:    new(string),
+		ScenarioEquals: new(string),
+		OriginEquals:   new(string),
 	}
 	var delDecisionId string
 	var delDecisionAll bool
+	contained := new(bool)
+
 	var cmdDecisionsDelete = &cobra.Command{
 		Use:               "delete [options]",
 		Short:             "Delete decisions",
@@ -419,7 +395,6 @@ cscli decisions add --scope username --value foobar
 		Aliases:           []string{"remove"},
 		Example: `cscli decisions delete -r 1.2.3.0/24
 cscli decisions delete -i 1.2.3.4
-cscli decisions delete -s crowdsecurity/ssh-bf
 cscli decisions delete --id 42
 cscli decisions delete --type captcha
 `,
@@ -430,7 +405,8 @@ cscli decisions delete --type captcha
 			}
 			if *delFilter.ScopeEquals == "" && *delFilter.ValueEquals == "" &&
 				*delFilter.TypeEquals == "" && *delFilter.IPEquals == "" &&
-				*delFilter.RangeEquals == "" && delDecisionId == "" {
+				*delFilter.RangeEquals == "" && *delFilter.ScenarioEquals == "" &&
+				*delFilter.OriginEquals == "" && delDecisionId == "" {
 				cmd.Usage()
 				log.Fatalln("At least one filter or --all must be specified")
 			}
@@ -446,18 +422,21 @@ cscli decisions delete --type captcha
 			if *delFilter.ScopeEquals == "" {
 				delFilter.ScopeEquals = nil
 			}
+			if *delFilter.OriginEquals == "" {
+				delFilter.OriginEquals = nil
+			}
 			if *delFilter.ValueEquals == "" {
 				delFilter.ValueEquals = nil
 			}
-
+			if *delFilter.ScenarioEquals == "" {
+				delFilter.ScenarioEquals = nil
+			}
 			if *delFilter.TypeEquals == "" {
 				delFilter.TypeEquals = nil
 			}
-
 			if *delFilter.IPEquals == "" {
 				delFilter.IPEquals = nil
 			}
-
 			if *delFilter.RangeEquals == "" {
 				delFilter.RangeEquals = nil
 			}
@@ -468,12 +447,15 @@ cscli decisions delete --type captcha
 			if delDecisionId == "" {
 				decisions, _, err = Client.Decisions.Delete(context.Background(), delFilter)
 				if err != nil {
-					log.Fatalf("Unable to delete decisions : %v", err.Error())
+					log.Fatalf("Unable to delete decisions : %v", err)
 				}
 			} else {
+				if _, err = strconv.Atoi(delDecisionId); err != nil {
+					log.Fatalf("id '%s' is not an integer: %v", delDecisionId, err)
+				}
 				decisions, _, err = Client.Decisions.DeleteOne(context.Background(), delDecisionId)
 				if err != nil {
-					log.Fatalf("Unable to delete decision : %v", err.Error())
+					log.Fatalf("Unable to delete decision : %v", err)
 				}
 			}
 			log.Infof("%s decision(s) deleted", decisions.NbDeleted)
@@ -483,20 +465,29 @@ cscli decisions delete --type captcha
 	cmdDecisionsDelete.Flags().SortFlags = false
 	cmdDecisionsDelete.Flags().StringVarP(delFilter.IPEquals, "ip", "i", "", "Source ip (shorthand for --scope ip --value <IP>)")
 	cmdDecisionsDelete.Flags().StringVarP(delFilter.RangeEquals, "range", "r", "", "Range source ip (shorthand for --scope range --value <RANGE>)")
-	cmdDecisionsDelete.Flags().StringVar(&delDecisionId, "id", "", "decision id")
 	cmdDecisionsDelete.Flags().StringVarP(delFilter.TypeEquals, "type", "t", "", "the decision type (ie. ban,captcha)")
 	cmdDecisionsDelete.Flags().StringVarP(delFilter.ValueEquals, "value", "v", "", "the value to match for in the specified scope")
+	cmdDecisionsDelete.Flags().StringVarP(delFilter.ScenarioEquals, "scenario", "s", "", "the scenario name (ie. crowdsecurity/ssh-bf)")
+	cmdDecisionsDelete.Flags().StringVar(delFilter.OriginEquals, "origin", "", fmt.Sprintf("the value to match for the specified origin (%s ...)", strings.Join(types.GetOrigins(), ",")))
+
+	cmdDecisionsDelete.Flags().StringVar(&delDecisionId, "id", "", "decision id")
 	cmdDecisionsDelete.Flags().BoolVar(&delDecisionAll, "all", false, "delete all decisions")
 	cmdDecisionsDelete.Flags().BoolVar(contained, "contained", false, "query decisions contained by range")
 
-	cmdDecisions.AddCommand(cmdDecisionsDelete)
+	return cmdDecisionsDelete
+}
 
+func NewDecisionsImportCmd() *cobra.Command {
 	var (
-		importDuration string
-		importScope    string
-		importReason   string
-		importType     string
-		importFile     string
+		defaultDuration = "4h"
+		defaultScope    = "ip"
+		defaultType     = "ban"
+		defaultReason   = "manual"
+		importDuration  string
+		importScope     string
+		importReason    string
+		importType      string
+		importFile      string
 	)
 
 	var cmdDecisionImport = &cobra.Command{
@@ -560,7 +551,7 @@ decisions.json :
 					decisionLine.Duration = importDuration
 					log.Debugf("'duration' line %d, using supplied value: '%s'", line, importDuration)
 				}
-				decisionLine.Origin = "cscli-import"
+				decisionLine.Origin = types.CscliImportOrigin
 
 				if decisionLine.Scenario == "" {
 					decisionLine.Scenario = defaultReason
@@ -600,11 +591,11 @@ decisions.json :
 			alerts := models.AddAlertsRequest{}
 			importAlert := models.Alert{
 				CreatedAt: time.Now().UTC().Format(time.RFC3339),
-				Scenario:  types.StrPtr(fmt.Sprintf("add: %d IPs", len(decisionsList))),
+				Scenario:  types.StrPtr(fmt.Sprintf("import %s : %d IPs", importFile, len(decisionsList))),
 				Message:   types.StrPtr(""),
 				Events:    []*models.Event{},
 				Source: &models.Source{
-					Scope: types.StrPtr("cscli/manual-import"),
+					Scope: types.StrPtr(""),
 					Value: types.StrPtr(""),
 				},
 				StartAt:         types.StrPtr(time.Now().UTC().Format(time.RFC3339)),
@@ -625,7 +616,7 @@ decisions.json :
 
 			_, _, err = Client.Alerts.Add(context.Background(), alerts)
 			if err != nil {
-				log.Fatalf(err.Error())
+				log.Fatal(err)
 			}
 			log.Infof("%d decisions successfully imported", len(decisionsList))
 		},
@@ -637,7 +628,6 @@ decisions.json :
 	cmdDecisionImport.Flags().StringVar(&importScope, "scope", types.Ip, "Decision scope (ie. ip,range,username)")
 	cmdDecisionImport.Flags().StringVarP(&importReason, "reason", "R", "", "Decision reason (ie. scenario-name)")
 	cmdDecisionImport.Flags().StringVarP(&importType, "type", "t", "", "Decision type (ie. ban,captcha,throttle)")
-	cmdDecisions.AddCommand(cmdDecisionImport)
 
-	return cmdDecisions
+	return cmdDecisionImport
 }

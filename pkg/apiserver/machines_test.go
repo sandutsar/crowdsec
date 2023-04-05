@@ -19,7 +19,7 @@ func TestCreateMachine(t *testing.T) {
 
 	// Create machine with invalid format
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("POST", "/v1/watchers", strings.NewReader("test"))
+	req, _ := http.NewRequest(http.MethodPost, "/v1/watchers", strings.NewReader("test"))
 	req.Header.Add("User-Agent", UserAgent)
 	router.ServeHTTP(w, req)
 
@@ -28,7 +28,7 @@ func TestCreateMachine(t *testing.T) {
 
 	// Create machine with invalid input
 	w = httptest.NewRecorder()
-	req, _ = http.NewRequest("POST", "/v1/watchers", strings.NewReader("{\"test\": \"test\"}"))
+	req, _ = http.NewRequest(http.MethodPost, "/v1/watchers", strings.NewReader("{\"test\": \"test\"}"))
 	req.Header.Add("User-Agent", UserAgent)
 	router.ServeHTTP(w, req)
 
@@ -38,12 +38,12 @@ func TestCreateMachine(t *testing.T) {
 	// Create machine
 	b, err := json.Marshal(MachineTest)
 	if err != nil {
-		log.Fatalf("unable to marshal MachineTest")
+		log.Fatal("unable to marshal MachineTest")
 	}
 	body := string(b)
 
 	w = httptest.NewRecorder()
-	req, _ = http.NewRequest("POST", "/v1/watchers", strings.NewReader(body))
+	req, _ = http.NewRequest(http.MethodPost, "/v1/watchers", strings.NewReader(body))
 	req.Header.Add("User-Agent", UserAgent)
 	router.ServeHTTP(w, req)
 
@@ -61,12 +61,12 @@ func TestCreateMachineWithForwardedFor(t *testing.T) {
 	// Create machine
 	b, err := json.Marshal(MachineTest)
 	if err != nil {
-		log.Fatalf("unable to marshal MachineTest")
+		log.Fatal("unable to marshal MachineTest")
 	}
 	body := string(b)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("POST", "/v1/watchers", strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, "/v1/watchers", strings.NewReader(body))
 	req.Header.Add("User-Agent", UserAgent)
 	req.Header.Add("X-Real-Ip", "1.1.1.1")
 	router.ServeHTTP(w, req)
@@ -90,12 +90,12 @@ func TestCreateMachineWithForwardedForNoConfig(t *testing.T) {
 	// Create machine
 	b, err := json.Marshal(MachineTest)
 	if err != nil {
-		log.Fatalf("unable to marshal MachineTest")
+		log.Fatal("unable to marshal MachineTest")
 	}
 	body := string(b)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("POST", "/v1/watchers", strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, "/v1/watchers", strings.NewReader(body))
 	req.Header.Add("User-Agent", UserAgent)
 	req.Header.Add("X-Real-IP", "1.1.1.1")
 	router.ServeHTTP(w, req)
@@ -121,12 +121,12 @@ func TestCreateMachineWithoutForwardedFor(t *testing.T) {
 	// Create machine
 	b, err := json.Marshal(MachineTest)
 	if err != nil {
-		log.Fatalf("unable to marshal MachineTest")
+		log.Fatal("unable to marshal MachineTest")
 	}
 	body := string(b)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("POST", "/v1/watchers", strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, "/v1/watchers", strings.NewReader(body))
 	req.Header.Add("User-Agent", UserAgent)
 	router.ServeHTTP(w, req)
 
@@ -150,16 +150,16 @@ func TestCreateMachineAlreadyExist(t *testing.T) {
 
 	body, err := CreateTestMachine(router)
 	if err != nil {
-		log.Fatalln(err.Error())
+		log.Fatalln(err)
 	}
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("POST", "/v1/watchers", strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, "/v1/watchers", strings.NewReader(body))
 	req.Header.Add("User-Agent", UserAgent)
 	router.ServeHTTP(w, req)
 
 	w = httptest.NewRecorder()
-	req, _ = http.NewRequest("POST", "/v1/watchers", strings.NewReader(body))
+	req, _ = http.NewRequest(http.MethodPost, "/v1/watchers", strings.NewReader(body))
 	req.Header.Add("User-Agent", UserAgent)
 	router.ServeHTTP(w, req)
 

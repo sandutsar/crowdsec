@@ -3,21 +3,20 @@ package syslogacquisition
 import (
 	"fmt"
 	"net"
-	"strconv"
+	"strings"
 	"time"
 
-	"github.com/crowdsecurity/crowdsec/pkg/acquisition/configuration"
-	syslogserver "github.com/crowdsecurity/crowdsec/pkg/acquisition/modules/syslog/internal"
-	leaky "github.com/crowdsecurity/crowdsec/pkg/leakybucket"
-	"github.com/crowdsecurity/crowdsec/pkg/types"
-	"github.com/influxdata/go-syslog/v3/rfc3164"
-	"github.com/influxdata/go-syslog/v3/rfc5424"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
-
 	"gopkg.in/tomb.v2"
 	"gopkg.in/yaml.v2"
+
+	"github.com/crowdsecurity/crowdsec/pkg/acquisition/configuration"
+	"github.com/crowdsecurity/crowdsec/pkg/acquisition/modules/syslog/internal/parser/rfc3164"
+	"github.com/crowdsecurity/crowdsec/pkg/acquisition/modules/syslog/internal/parser/rfc5424"
+	syslogserver "github.com/crowdsecurity/crowdsec/pkg/acquisition/modules/syslog/internal/server"
+	"github.com/crowdsecurity/crowdsec/pkg/types"
 )
 
 type SyslogConfiguration struct {
@@ -49,6 +48,10 @@ var linesParsed = prometheus.NewCounterVec(
 	},
 	[]string{"source", "type"})
 
+func (s *SyslogSource) GetUuid() string {
+	return s.config.UniqueId
+}
+
 func (s *SyslogSource) GetName() string {
 	return "syslog"
 }
@@ -73,7 +76,7 @@ func (s *SyslogSource) GetAggregMetrics() []prometheus.Collector {
 	return []prometheus.Collector{linesReceived, linesParsed}
 }
 
-func (s *SyslogSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry) error {
+func (s *SyslogSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry, uuid string) error {
 	return fmt.Errorf("syslog datasource does not support one shot acquisition")
 }
 
@@ -89,31 +92,43 @@ func validateAddr(addr string) bool {
 	return net.ParseIP(addr) != nil
 }
 
-func (s *SyslogSource) Configure(yamlConfig []byte, logger *log.Entry) error {
-	s.logger = logger
-	s.logger.Infof("Starting syslog datasource configuration")
-	syslogConfig := SyslogConfiguration{}
-	syslogConfig.Mode = configuration.TAIL_MODE
-	err := yaml.UnmarshalStrict(yamlConfig, &syslogConfig)
+func (s *SyslogSource) UnmarshalConfig(yamlConfig []byte) error {
+	s.config = SyslogConfiguration{}
+	s.config.Mode = configuration.TAIL_MODE
+
+	err := yaml.UnmarshalStrict(yamlConfig, &s.config)
 	if err != nil {
 		return errors.Wrap(err, "Cannot parse syslog configuration")
 	}
-	if syslogConfig.Addr == "" {
-		syslogConfig.Addr = "127.0.0.1" //do we want a usable or secure default ?
+
+	if s.config.Addr == "" {
+		s.config.Addr = "127.0.0.1" //do we want a usable or secure default ?
 	}
-	if syslogConfig.Port == 0 {
-		syslogConfig.Port = 514
+	if s.config.Port == 0 {
+		s.config.Port = 514
 	}
-	if syslogConfig.MaxMessageLen == 0 {
-		syslogConfig.MaxMessageLen = 2048
+	if s.config.MaxMessageLen == 0 {
+		s.config.MaxMessageLen = 2048
 	}
-	if !validatePort(syslogConfig.Port) {
-		return fmt.Errorf("invalid port %d", syslogConfig.Port)
+	if !validatePort(s.config.Port) {
+		return fmt.Errorf("invalid port %d", s.config.Port)
 	}
-	if !validateAddr(syslogConfig.Addr) {
-		return fmt.Errorf("invalid listen IP %s", syslogConfig.Addr)
+	if !validateAddr(s.config.Addr) {
+		return fmt.Errorf("invalid listen IP %s", s.config.Addr)
 	}
-	s.config = syslogConfig
+
+	return nil
+}
+
+func (s *SyslogSource) Configure(yamlConfig []byte, logger *log.Entry) error {
+	s.logger = logger
+	s.logger.Infof("Starting syslog datasource configuration")
+
+	err := s.UnmarshalConfig(yamlConfig)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -133,49 +148,33 @@ func (s *SyslogSource) StreamingAcquisition(out chan types.Event, t *tomb.Tomb) 
 	return nil
 }
 
-func (s *SyslogSource) buildLogFromSyslog(ts *time.Time, hostname *string,
-	appname *string, pid *string, msg *string) (string, error) {
+func (s *SyslogSource) buildLogFromSyslog(ts time.Time, hostname string,
+	appname string, pid string, msg string) string {
 	ret := ""
-	if msg == nil {
-		return "", errors.Errorf("missing message field in syslog message")
-	}
-	if ts != nil {
+	if !ts.IsZero() {
 		ret += ts.Format("Jan 2 15:04:05")
 	} else {
-		s.logger.Tracef("%s - missing TS", *msg)
+		s.logger.Tracef("%s - missing TS", msg)
 		ret += time.Now().UTC().Format("Jan 2 15:04:05")
 	}
-	if hostname != nil {
-		ret += " " + *hostname
+	if hostname != "" {
+		ret += " " + hostname
 	} else {
-		s.logger.Tracef("%s - missing host", *msg)
+		s.logger.Tracef("%s - missing host", msg)
 		ret += " unknownhost"
 	}
-	if appname != nil {
-		ret += " " + *appname
-	} else {
-		return "", errors.Errorf("missing appname field in syslog message")
+	if appname != "" {
+		ret += " " + appname
 	}
-	if pid != nil {
-		/*
-			!!! ugly hack !!!
-			Due to a bug in the syslog parser we use (https://github.com/influxdata/go-syslog/issues/31),
-			the ProcID field will contain garbage if the message as a ] anywhere in it.
-			Assume that a correctly formatted ProcID only contains number, and if this is not the case, set it to an arbitrary value
-		*/
-		_, err := strconv.Atoi(*pid)
-		if err != nil {
-			ret += "[1]: "
-		} else {
-			ret += "[" + *pid + "]: "
-		}
+	if pid != "" {
+		ret += "[" + pid + "]: "
 	} else {
 		ret += ": "
 	}
-	if msg != nil {
-		ret += *msg
+	if msg != "" {
+		ret += msg
 	}
-	return ret, nil
+	return ret
 
 }
 
@@ -199,38 +198,24 @@ func (s *SyslogSource) handleSyslogMsg(out chan types.Event, t *tomb.Tomb, c cha
 			logger := s.logger.WithField("client", syslogLine.Client)
 			logger.Tracef("raw: %s", syslogLine)
 			linesReceived.With(prometheus.Labels{"source": syslogLine.Client}).Inc()
-			p := rfc5424.NewParser()
-			m, err := p.Parse(syslogLine.Message)
+			p := rfc3164.NewRFC3164Parser(rfc3164.WithCurrentYear())
+			err := p.Parse(syslogLine.Message)
 			if err != nil {
-				logger.Debugf("could not parse as RFC5424 (%s)", err)
-				p = rfc3164.NewParser(rfc3164.WithYear(rfc3164.CurrentYear{}))
-				m, err = p.Parse(syslogLine.Message)
+				logger.Debugf("could not parse as RFC3164 (%s)", err)
+				p2 := rfc5424.NewRFC5424Parser()
+				err = p2.Parse(syslogLine.Message)
 				if err != nil {
 					logger.Errorf("could not parse message: %s", err)
-					logger.Debugf("could not parse as RFC3164 (%s) : %s", err, syslogLine.Message)
+					logger.Debugf("could not parse as RFC5424 (%s) : %s", err, syslogLine.Message)
 					continue
 				}
-				msg := m.(*rfc3164.SyslogMessage)
-				line, err = s.buildLogFromSyslog(msg.Timestamp, msg.Hostname, msg.Appname, msg.ProcID, msg.Message)
-				if err != nil {
-					logger.Debugf("could not parse as RFC3164 (%s) : %s", err, syslogLine.Message)
-					logger.Error(err)
-					continue
-				}
-				linesParsed.With(prometheus.Labels{"source": syslogLine.Client,
-					"type": "RFC3164"}).Inc()
+				line = s.buildLogFromSyslog(p2.Timestamp, p2.Hostname, p2.Tag, p2.PID, p2.Message)
 			} else {
-				msg := m.(*rfc5424.SyslogMessage)
-				line, err = s.buildLogFromSyslog(msg.Timestamp, msg.Hostname, msg.Appname, msg.ProcID, msg.Message)
-				if err != nil {
-					log.Debugf("could not parse message as RFC5424 (%s) : %s", err, syslogLine.Message)
-					logger.Error(err)
-					continue
-				}
-				linesParsed.With(prometheus.Labels{"source": syslogLine.Client,
-					"type": "RFC5424"}).Inc()
-
+				line = s.buildLogFromSyslog(p.Timestamp, p.Hostname, p.Tag, p.PID, p.Message)
 			}
+
+			line = strings.TrimSuffix(line, "\n")
+
 			l := types.Line{}
 			l.Raw = line
 			l.Module = s.GetName()
@@ -239,9 +224,9 @@ func (s *SyslogSource) handleSyslogMsg(out chan types.Event, t *tomb.Tomb, c cha
 			l.Src = syslogLine.Client
 			l.Process = true
 			if !s.config.UseTimeMachine {
-				out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.LIVE}
+				out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: types.LIVE}
 			} else {
-				out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.TIMEMACHINE}
+				out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: types.TIMEMACHINE}
 			}
 		}
 	}

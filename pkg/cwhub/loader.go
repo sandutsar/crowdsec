@@ -2,28 +2,22 @@ package cwhub
 
 import (
 	"encoding/json"
-	//"errors"
 	"fmt"
-	"io/ioutil"
-	"sort"
-
-	"github.com/pkg/errors"
-	"golang.org/x/mod/semver"
-
-	//"log"
-
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/crowdsecurity/crowdsec/pkg/csconfig"
+	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/mod/semver"
 )
 
 /*the walk/parser_visit function can't receive extra args*/
 var hubdir, installdir string
 
-func parser_visit(path string, f os.FileInfo, err error) error {
+func parser_visit(path string, f os.DirEntry, err error) error {
 
 	var target Item
 	var local bool
@@ -33,6 +27,12 @@ func parser_visit(path string, f os.FileInfo, err error) error {
 	var ftype string
 	var fauthor string
 	var stage string
+
+	if err != nil {
+		log.Debugf("while syncing hub dir: %s", err)
+		// there is a path error, we ignore the file
+		return nil
+	}
 
 	path, err = filepath.Abs(path)
 	if err != nil {
@@ -102,7 +102,7 @@ func parser_visit(path string, f os.FileInfo, err error) error {
 		when the collection is installed, both files are created
 	*/
 	//non symlinks are local user files or hub files
-	if f.Mode()&os.ModeSymlink == 0 {
+	if f.Type() & os.ModeSymlink == 0 {
 		local = true
 		log.Tracef("%s isn't a symlink", path)
 	} else {
@@ -169,12 +169,10 @@ func parser_visit(path string, f os.FileInfo, err error) error {
 				log.Tracef("marking %s as downloaded", v.Name)
 				v.Downloaded = true
 			}
-		} else {
+		} else if CheckSuffix(hubpath, v.RemotePath) {
 			//wrong file
 			//<type>/<stage>/<author>/<name>.yaml
-			if CheckSuffix(hubpath, v.RemotePath) {
-				continue
-			}
+			continue
 		}
 		sha, err := getSHA256(path)
 		if err != nil {
@@ -269,6 +267,9 @@ func CollecDepsCheck(v *Item) error {
 				if val.Type == COLLECTIONS {
 					log.Tracef("collec, recurse.")
 					if err := CollecDepsCheck(&val); err != nil {
+						if val.Tainted {
+							v.Tainted = true
+						}
 						return fmt.Errorf("sub collection %s is broken : %s", val.Name, err)
 					}
 					hubIdx[ptrtype][p] = val
@@ -315,7 +316,7 @@ func SyncDir(hub *csconfig.Hub, dir string) (error, []string) {
 		if err != nil {
 			log.Errorf("failed %s : %s", cpath, err)
 		}
-		err = filepath.Walk(cpath, parser_visit)
+		err = filepath.WalkDir(cpath, parser_visit)
 		if err != nil {
 			return err, warnings
 		}
@@ -362,7 +363,7 @@ func GetHubIdx(hub *csconfig.Hub) error {
 		return fmt.Errorf("no configuration found for hub")
 	}
 	log.Debugf("loading hub idx %s", hub.HubIndexFile)
-	bidx, err := ioutil.ReadFile(hub.HubIndexFile)
+	bidx, err := os.ReadFile(hub.HubIndexFile)
 	if err != nil {
 		return errors.Wrap(err, "unable to read index file")
 	}

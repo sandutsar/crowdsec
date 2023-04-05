@@ -4,7 +4,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -13,18 +13,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crowdsecurity/crowdsec/pkg/cwhub"
-	"github.com/crowdsecurity/crowdsec/pkg/cwversion"
-	"github.com/crowdsecurity/crowdsec/pkg/types"
-	"github.com/enescakir/emoji"
-	"github.com/olekukonko/tablewriter"
+	"github.com/fatih/color"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/prom2json"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"golang.org/x/mod/semver"
+	"github.com/texttheater/golang-levenshtein/levenshtein"
 	"gopkg.in/yaml.v2"
+
+	"github.com/crowdsecurity/crowdsec/pkg/cwhub"
+	"github.com/crowdsecurity/crowdsec/pkg/database"
+	"github.com/crowdsecurity/crowdsec/pkg/types"
 )
+
+const MaxDistance = 7
 
 func printHelp(cmd *cobra.Command) {
 	err := cmd.Help()
@@ -53,21 +55,54 @@ func indexOf(s string, slice []string) int {
 
 func LoadHub() error {
 	if err := csConfig.LoadHub(); err != nil {
-		log.Fatalf(err.Error())
+		log.Fatal(err)
 	}
 	if csConfig.Hub == nil {
 		return fmt.Errorf("unable to load hub")
 	}
 
-	if err := setHubBranch(); err != nil {
+	if err := cwhub.SetHubBranch(); err != nil {
 		log.Warningf("unable to set hub branch (%s), default to master", err)
 	}
 
 	if err := cwhub.GetHubIdx(csConfig.Hub); err != nil {
-		return fmt.Errorf("Failed to get Hub index : '%v'. Run 'sudo cscli hub update' to get the hub index", err)
+		return fmt.Errorf("Failed to get Hub index : '%w'. Run 'sudo cscli hub update' to get the hub index", err)
 	}
 
 	return nil
+}
+
+func Suggest(itemType string, baseItem string, suggestItem string, score int, ignoreErr bool) {
+	errMsg := ""
+	if score < MaxDistance {
+		errMsg = fmt.Sprintf("unable to find %s '%s', did you mean %s ?", itemType, baseItem, suggestItem)
+	} else {
+		errMsg = fmt.Sprintf("unable to find %s '%s'", itemType, baseItem)
+	}
+	if ignoreErr {
+		log.Error(errMsg)
+	} else {
+		log.Fatalf(errMsg)
+	}
+}
+
+func GetDistance(itemType string, itemName string) (*cwhub.Item, int) {
+	allItems := make([]string, 0)
+	nearestScore := 100
+	nearestItem := &cwhub.Item{}
+	hubItems := cwhub.GetHubStatusForItemType(itemType, "", true)
+	for _, item := range hubItems {
+		allItems = append(allItems, item.Name)
+	}
+
+	for _, s := range allItems {
+		d := levenshtein.DistanceForStrings([]rune(itemName), []rune(s), levenshtein.DefaultOptions)
+		if d < nearestScore {
+			nearestScore = d
+			nearestItem = cwhub.GetItem(itemType, s)
+		}
+	}
+	return nearestItem, nearestScore
 }
 
 func compAllItems(itemType string, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -78,12 +113,8 @@ func compAllItems(itemType string, args []string, toComplete string) ([]string, 
 	comp := make([]string, 0)
 	hubItems := cwhub.GetHubStatusForItemType(itemType, "", true)
 	for _, item := range hubItems {
-		if toComplete == "" {
+		if !inSlice(item.Name, args) && strings.Contains(item.Name, toComplete) {
 			comp = append(comp, item.Name)
-		} else {
-			if strings.Contains(item.Name, toComplete) {
-				comp = append(comp, item.Name)
-			}
 		}
 	}
 	cobra.CompDebugln(fmt.Sprintf("%s: %+v", itemType, comp), true)
@@ -131,8 +162,7 @@ func compInstalledItems(itemType string, args []string, toComplete string) ([]st
 	return comp, cobra.ShellCompDirectiveNoFileComp
 }
 
-func ListItems(itemTypes []string, args []string, showType bool, showHeader bool, all bool) {
-
+func ListItems(out io.Writer, itemTypes []string, args []string, showType bool, showHeader bool, all bool) {
 	var hubStatusByItemType = make(map[string][]cwhub.ItemHubStatus)
 
 	for _, itemType := range itemTypes {
@@ -151,26 +181,16 @@ func ListItems(itemTypes []string, args []string, showType bool, showHeader bool
 				log.Errorf("unknown item type: %s", itemType)
 				continue
 			}
-			fmt.Println(strings.ToUpper(itemType))
-			table := tablewriter.NewWriter(os.Stdout)
-			table.SetCenterSeparator("")
-			table.SetColumnSeparator("")
-			table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-			table.SetAlignment(tablewriter.ALIGN_LEFT)
-			table.SetHeader([]string{"Name", fmt.Sprintf("%v Status", emoji.Package), "Version", "Local Path"})
-			for _, status := range statuses {
-				table.Append([]string{status.Name, status.UTF8_Status, status.LocalVersion, status.LocalPath})
-			}
-			table.Render()
+			listHubItemTable(out, "\n"+strings.ToUpper(itemType), statuses)
 		}
 	} else if csConfig.Cscli.Output == "json" {
 		x, err := json.MarshalIndent(hubStatusByItemType, "", " ")
 		if err != nil {
 			log.Fatalf("failed to unmarshal")
 		}
-		fmt.Printf("%s", string(x))
+		out.Write(x)
 	} else if csConfig.Cscli.Output == "raw" {
-		csvwriter := csv.NewWriter(os.Stdout)
+		csvwriter := csv.NewWriter(out)
 		if showHeader {
 			header := []string{"name", "status", "version", "description"}
 			if showType {
@@ -237,18 +257,23 @@ func InspectItem(name string, objecitemType string) {
 		return
 	}
 
-	if csConfig.Prometheus.Enabled {
-		if csConfig.Prometheus.ListenAddr == "" || csConfig.Prometheus.ListenPort == 0 {
-			log.Warningf("No prometheus address or port specified in '%s', can't show metrics", *csConfig.FilePath)
-			return
+	if prometheusURL == "" {
+		//This is technically wrong to do this, as the prometheus section contains a listen address, not an URL to query prometheus
+		//But for ease of use, we will use the listen address as the prometheus URL because it will be 127.0.0.1 in the default case
+		listenAddr := csConfig.Prometheus.ListenAddr
+		if listenAddr == "" {
+			listenAddr = "127.0.0.1"
 		}
-		if prometheusURL == "" {
-			log.Debugf("No prometheus URL provided using: %s:%d", csConfig.Prometheus.ListenAddr, csConfig.Prometheus.ListenPort)
-			prometheusURL = fmt.Sprintf("http://%s:%d/metrics", csConfig.Prometheus.ListenAddr, csConfig.Prometheus.ListenPort)
+		listenPort := csConfig.Prometheus.ListenPort
+		if listenPort == 0 {
+			listenPort = 6060
 		}
-		fmt.Printf("\nCurrent metrics : \n\n")
-		ShowMetrics(hubItem)
+		prometheusURL = fmt.Sprintf("http://%s:%d/metrics", listenAddr, listenPort)
+		log.Debugf("No prometheus URL provided using: %s", prometheusURL)
 	}
+
+	fmt.Printf("\nCurrent metrics : \n")
+	ShowMetrics(hubItem)
 }
 
 func manageCliDecisionAlerts(ip *string, ipRange *string, scope *string, value *string) error {
@@ -281,54 +306,25 @@ func manageCliDecisionAlerts(ip *string, ipRange *string, scope *string, value *
 	return nil
 }
 
-func setHubBranch() error {
-	/*
-		if no branch has been specified in flags for the hub, then use the one corresponding to crowdsec version
-	*/
-	if cwhub.HubBranch == "" {
-		latest, err := cwversion.Latest()
-		if err != nil {
-			cwhub.HubBranch = "master"
-			return err
-		}
-		csVersion := cwversion.VersionStrip()
-		if csVersion == latest {
-			cwhub.HubBranch = "master"
-		} else if semver.Compare(csVersion, latest) == 1 { // if current version is greater than the latest we are in pre-release
-			log.Debugf("Your current crowdsec version seems to be a pre-release (%s)", csVersion)
-			cwhub.HubBranch = "master"
-		} else if csVersion == "" {
-			log.Warningf("Crowdsec version is '', using master branch for the hub")
-			cwhub.HubBranch = "master"
-		} else {
-			log.Warnf("Crowdsec is not the latest version. Current version is '%s' and the latest stable version is '%s'. Please update it!", csVersion, latest)
-			log.Warnf("As a result, you will not be able to use parsers/scenarios/collections added to Crowdsec Hub after CrowdSec %s", latest)
-			cwhub.HubBranch = csVersion
-		}
-		log.Debugf("Using branch '%s' for the hub", cwhub.HubBranch)
-	}
-	return nil
-}
-
 func ShowMetrics(hubItem *cwhub.Item) {
 	switch hubItem.Type {
 	case cwhub.PARSERS:
 		metrics := GetParserMetric(prometheusURL, hubItem.Name)
-		ShowParserMetric(hubItem.Name, metrics)
+		parserMetricsTable(color.Output, hubItem.Name, metrics)
 	case cwhub.SCENARIOS:
 		metrics := GetScenarioMetric(prometheusURL, hubItem.Name)
-		ShowScenarioMetric(hubItem.Name, metrics)
+		scenarioMetricsTable(color.Output, hubItem.Name, metrics)
 	case cwhub.COLLECTIONS:
 		for _, item := range hubItem.Parsers {
 			metrics := GetParserMetric(prometheusURL, item)
-			ShowParserMetric(item, metrics)
+			parserMetricsTable(color.Output, item, metrics)
 		}
 		for _, item := range hubItem.Scenarios {
 			metrics := GetScenarioMetric(prometheusURL, item)
-			ShowScenarioMetric(item, metrics)
+			scenarioMetricsTable(color.Output, item, metrics)
 		}
 		for _, item := range hubItem.Collections {
-			hubItem := cwhub.GetItem(cwhub.COLLECTIONS, item)
+			hubItem = cwhub.GetItem(cwhub.COLLECTIONS, item)
 			if hubItem == nil {
 				log.Fatalf("unable to retrieve item '%s' from collection '%s'", item, hubItem.Name)
 			}
@@ -339,7 +335,7 @@ func ShowMetrics(hubItem *cwhub.Item) {
 	}
 }
 
-/*This is a complete rip from prom2json*/
+// GetParserMetric is a complete rip from prom2json
 func GetParserMetric(url string, itemName string) map[string]map[string]int {
 	stats := make(map[string]map[string]int)
 
@@ -350,7 +346,11 @@ func GetParserMetric(url string, itemName string) map[string]map[string]int {
 		}
 		log.Tracef("round %d", idx)
 		for _, m := range fam.Metrics {
-			metric := m.(prom2json.Metric)
+			metric, ok := m.(prom2json.Metric)
+			if !ok {
+				log.Debugf("failed to convert metric to prom2json.Metric")
+				continue
+			}
 			name, ok := metric.Labels["name"]
 			if !ok {
 				log.Debugf("no name in Metric %v", metric.Labels)
@@ -420,7 +420,7 @@ func GetParserMetric(url string, itemName string) map[string]map[string]int {
 func GetScenarioMetric(url string, itemName string) map[string]int {
 	stats := make(map[string]int)
 
-	stats["instanciation"] = 0
+	stats["instantiation"] = 0
 	stats["curr_count"] = 0
 	stats["overflow"] = 0
 	stats["pour"] = 0
@@ -433,7 +433,11 @@ func GetScenarioMetric(url string, itemName string) map[string]int {
 		}
 		log.Tracef("round %d", idx)
 		for _, m := range fam.Metrics {
-			metric := m.(prom2json.Metric)
+			metric, ok := m.(prom2json.Metric)
+			if !ok {
+				log.Debugf("failed to convert metric to prom2json.Metric")
+				continue
+			}
 			name, ok := metric.Labels["name"]
 			if !ok {
 				log.Debugf("no name in Metric %v", metric.Labels)
@@ -451,7 +455,7 @@ func GetScenarioMetric(url string, itemName string) map[string]int {
 
 			switch fam.Name {
 			case "cs_bucket_created_total":
-				stats["instanciation"] += ival
+				stats["instantiation"] += ival
 			case "cs_buckets":
 				stats["curr_count"] += ival
 			case "cs_bucket_overflowed_total":
@@ -468,7 +472,7 @@ func GetScenarioMetric(url string, itemName string) map[string]int {
 	return stats
 }
 
-//it's a rip of the cli version, but in silent-mode
+// it's a rip of the cli version, but in silent-mode
 func silenceInstallItem(name string, obtype string) (string, error) {
 	var item = cwhub.GetItem(obtype, name)
 	if item == nil {
@@ -527,44 +531,13 @@ func GetPrometheusMetric(url string) []*prom2json.Family {
 	return result
 }
 
-func ShowScenarioMetric(itemName string, metrics map[string]int) {
-	if metrics["instanciation"] == 0 {
-		return
-	}
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Current Count", "Overflows", "Instanciated", "Poured", "Expired"})
-	table.Append([]string{fmt.Sprintf("%d", metrics["curr_count"]), fmt.Sprintf("%d", metrics["overflow"]), fmt.Sprintf("%d", metrics["instanciation"]), fmt.Sprintf("%d", metrics["pour"]), fmt.Sprintf("%d", metrics["underflow"])})
-
-	fmt.Printf(" - (Scenario) %s: \n", itemName)
-	table.Render()
-	fmt.Println()
-}
-
-func ShowParserMetric(itemName string, metrics map[string]map[string]int) {
-	skip := true
-
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Parsers", "Hits", "Parsed", "Unparsed"})
-	for source, stats := range metrics {
-		if stats["hits"] > 0 {
-			table.Append([]string{source, fmt.Sprintf("%d", stats["hits"]), fmt.Sprintf("%d", stats["parsed"]), fmt.Sprintf("%d", stats["unparsed"])})
-			skip = false
-		}
-	}
-	if !skip {
-		fmt.Printf(" - (Parser) %s: \n", itemName)
-		table.Render()
-		fmt.Println()
-	}
-}
-
 func RestoreHub(dirPath string) error {
 	var err error
 
 	if err := csConfig.LoadHub(); err != nil {
 		return err
 	}
-	if err := setHubBranch(); err != nil {
+	if err := cwhub.SetHubBranch(); err != nil {
 		return fmt.Errorf("error while setting hub branch: %s", err)
 	}
 
@@ -576,12 +549,12 @@ func RestoreHub(dirPath string) error {
 		}
 		/*restore the upstream items*/
 		upstreamListFN := fmt.Sprintf("%s/upstream-%s.json", itemDirectory, itype)
-		file, err := ioutil.ReadFile(upstreamListFN)
+		file, err := os.ReadFile(upstreamListFN)
 		if err != nil {
 			return fmt.Errorf("error while opening %s : %s", upstreamListFN, err)
 		}
 		var upstreamList []string
-		err = json.Unmarshal([]byte(file), &upstreamList)
+		err = json.Unmarshal(file, &upstreamList)
 		if err != nil {
 			return fmt.Errorf("error unmarshaling %s : %s", upstreamListFN, err)
 		}
@@ -597,7 +570,7 @@ func RestoreHub(dirPath string) error {
 		}
 
 		/*restore the local and tainted items*/
-		files, err := ioutil.ReadDir(itemDirectory)
+		files, err := os.ReadDir(itemDirectory)
 		if err != nil {
 			return fmt.Errorf("failed enumerating files of %s : %s", itemDirectory, err)
 		}
@@ -618,7 +591,7 @@ func RestoreHub(dirPath string) error {
 					return fmt.Errorf("error while creating stage directory %s : %s", stagedir, err)
 				}
 				/*find items*/
-				ifiles, err := ioutil.ReadDir(itemDirectory + "/" + stage + "/")
+				ifiles, err := os.ReadDir(itemDirectory + "/" + stage + "/")
 				if err != nil {
 					return fmt.Errorf("failed enumerating files of %s : %s", itemDirectory+"/"+stage, err)
 				}
@@ -702,7 +675,7 @@ func BackupHub(dirPath string) error {
 		if err != nil {
 			return fmt.Errorf("failed marshaling upstream parsers : %s", err)
 		}
-		err = ioutil.WriteFile(upstreamParsersFname, upstreamParsersContent, 0644)
+		err = os.WriteFile(upstreamParsersFname, upstreamParsersContent, 0644)
 		if err != nil {
 			return fmt.Errorf("unable to write to %s %s : %s", itemType, upstreamParsersFname, err)
 		}
@@ -759,4 +732,41 @@ func formatNumber(num int) string {
 
 	res := math.Round(float64(num)/float64(goodUnit.value)*100) / 100
 	return fmt.Sprintf("%.2f%s", res, goodUnit.symbol)
+}
+
+func getDBClient() (*database.Client, error) {
+	var err error
+	if err := csConfig.LoadAPIServer(); err != nil || csConfig.DisableAPI {
+		return nil, err
+	}
+	ret, err := database.NewClient(csConfig.DbConfig)
+	if err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+
+func removeFromSlice(val string, slice []string) []string {
+	var i int
+	var value string
+
+	valueFound := false
+
+	// get the index
+	for i, value = range slice {
+		if value == val {
+			valueFound = true
+			break
+		}
+	}
+
+	if valueFound {
+		slice[i] = slice[len(slice)-1]
+		slice[len(slice)-1] = ""
+		slice = slice[:len(slice)-1]
+	}
+
+	return slice
+
 }

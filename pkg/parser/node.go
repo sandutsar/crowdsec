@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/antonmedv/expr"
 	"github.com/crowdsecurity/grokky"
@@ -11,6 +12,7 @@ import (
 	yaml "gopkg.in/yaml.v2"
 
 	"github.com/antonmedv/expr/vm"
+	"github.com/crowdsecurity/crowdsec/pkg/cache"
 	"github.com/crowdsecurity/crowdsec/pkg/exprhelpers"
 	"github.com/crowdsecurity/crowdsec/pkg/types"
 	"github.com/davecgh/go-spew/spew"
@@ -50,15 +52,17 @@ type Node struct {
 	EnrichFunctions EnricherCtx
 
 	/* If the node is actually a leaf, it can have : grok, enrich, statics */
-	//pattern_syntax are named grok patterns that are re-utilised over several grok patterns
+	//pattern_syntax are named grok patterns that are re-utilized over several grok patterns
 	SubGroks yaml.MapSlice `yaml:"pattern_syntax,omitempty"`
 
 	//Holds a grok pattern
 	Grok types.GrokPattern `yaml:"grok,omitempty"`
 	//Statics can be present in any type of node and is executed last
 	Statics []types.ExtraField `yaml:"statics,omitempty"`
+	//Stash allows to capture data from the log line and store it in an accessible cache
+	Stash []types.DataCapture `yaml:"stash,omitempty"`
 	//Whitelists
-	Whitelist types.Whitelist     `yaml:"whitelist,omitempty"`
+	Whitelist Whitelist           `yaml:"whitelist,omitempty"`
 	Data      []*types.DataSource `yaml:"data,omitempty"`
 }
 
@@ -101,6 +105,28 @@ func (n *Node) validate(pctx *UnixParserCtx, ectx EnricherCtx) error {
 			if static.Value == "" && static.RunTimeValue == nil {
 				return fmt.Errorf("static %d value or expression must be set", idx)
 			}
+		}
+	}
+
+	for idx, stash := range n.Stash {
+		if stash.Name == "" {
+			return fmt.Errorf("stash %d : name must be set", idx)
+		}
+		if stash.Value == "" {
+			return fmt.Errorf("stash %s : value expression must be set", stash.Name)
+		}
+		if stash.Key == "" {
+			return fmt.Errorf("stash %s : key expression must be set", stash.Name)
+		}
+		if stash.TTL == "" {
+			return fmt.Errorf("stash %s : ttl must be set", stash.Name)
+		}
+		if stash.Strategy == "" {
+			stash.Strategy = "LRU"
+		}
+		//should be configurable
+		if stash.MaxMapSize == 0 {
+			stash.MaxMapSize = 100
 		}
 	}
 	return nil
@@ -193,7 +219,7 @@ func (n *Node) process(p *types.Event, ctx UnixParserCtx, expressionEnv map[stri
 		output, err := expr.Run(e.Filter, cachedExprEnv)
 		if err != nil {
 			clog.Warningf("failed to run whitelist expr : %v", err)
-			clog.Debugf("Event leaving node : ko")
+			clog.Debug("Event leaving node : ko")
 			return false, nil
 		}
 		switch out := output.(type) {
@@ -272,7 +298,8 @@ func (n *Node) process(p *types.Event, ctx UnixParserCtx, expressionEnv map[stri
 			// if the grok succeed, process associated statics
 			err := n.ProcessStatics(n.Grok.Statics, p)
 			if err != nil {
-				clog.Fatalf("(%s) Failed to process statics : %v", n.rn, err)
+				clog.Errorf("(%s) Failed to process statics : %v", n.rn, err)
+				return false, err
 			}
 		} else {
 			//grok failed, node failed
@@ -282,6 +309,50 @@ func (n *Node) process(p *types.Event, ctx UnixParserCtx, expressionEnv map[stri
 
 	} else {
 		clog.Tracef("! No grok pattern : %p", n.Grok.RunTimeRegexp)
+	}
+
+	//Process the stash (data collection) if : a grok was present and succeeded, or if there is no grok
+	if NodeHasOKGrok || n.Grok.RunTimeRegexp == nil {
+		for idx, stash := range n.Stash {
+			var value string
+			var key string
+			if stash.ValueExpression == nil {
+				clog.Warningf("Stash %d has no value expression, skipping", idx)
+				continue
+			}
+			if stash.KeyExpression == nil {
+				clog.Warningf("Stash %d has no key expression, skipping", idx)
+				continue
+			}
+			//collect the data
+			output, err := expr.Run(stash.ValueExpression, cachedExprEnv)
+			if err != nil {
+				clog.Warningf("Error while running stash val expression : %v", err)
+			}
+			//can we expect anything else than a string ?
+			switch output := output.(type) {
+			case string:
+				value = output
+			default:
+				clog.Warningf("unexpected type %t (%v) while running '%s'", output, output, stash.Value)
+				continue
+			}
+
+			//collect the key
+			output, err = expr.Run(stash.KeyExpression, cachedExprEnv)
+			if err != nil {
+				clog.Warningf("Error while running stash key expression : %v", err)
+			}
+			//can we expect anything else than a string ?
+			switch output := output.(type) {
+			case string:
+				key = output
+			default:
+				clog.Warningf("unexpected type %t (%v) while running '%s'", output, output, stash.Key)
+				continue
+			}
+			cache.SetKey(stash.Name, key, value, &stash.TTLVal)
+		}
 	}
 
 	//Iterate on leafs
@@ -301,19 +372,17 @@ func (n *Node) process(p *types.Event, ctx UnixParserCtx, expressionEnv map[stri
 					clog.Debugf("child is success, OnSuccess=next_stage, skip")
 					break
 				}
-			} else {
+			} else if !NodeHasOKGrok {
 				/*
 					If the parent node has a successful grok pattern, it's state will stay successful even if one or more chil fails.
 					If the parent node is a skeleton node (no grok pattern), then at least one child must be successful for it to be a success.
 				*/
-				if !NodeHasOKGrok {
-					NodeState = false
-				}
+				NodeState = false
 			}
 		}
 	}
 	/*todo : check if a node made the state change ?*/
-	/* should the childs inherit the on_success behaviour */
+	/* should the childs inherit the on_success behavior */
 
 	clog.Tracef("State after nodes : %v", NodeState)
 
@@ -337,7 +406,8 @@ func (n *Node) process(p *types.Event, ctx UnixParserCtx, expressionEnv map[stri
 		// if all else is good in whitelist, process node's statics
 		err := n.ProcessStatics(n.Statics, p)
 		if err != nil {
-			clog.Fatalf("Failed to process statics : %v", err)
+			clog.Errorf("Failed to process statics : %v", err)
+			return false, err
 		}
 	} else {
 		clog.Tracef("! No node statics")
@@ -402,13 +472,13 @@ func (n *Node) compile(pctx *UnixParserCtx, ectx EnricherCtx) error {
 
 	//compile filter if present
 	if n.Filter != "" {
-		n.RunTimeFilter, err = expr.Compile(n.Filter, expr.Env(exprhelpers.GetExprEnv(map[string]interface{}{"evt": &types.Event{}})))
+		n.RunTimeFilter, err = expr.Compile(n.Filter, exprhelpers.GetExprOptions(map[string]interface{}{"evt": &types.Event{}})...)
 		if err != nil {
 			return fmt.Errorf("compilation of '%s' failed: %v", n.Filter, err)
 		}
 
 		if n.Debug {
-			n.ExprDebugger, err = exprhelpers.NewDebugger(n.Filter, expr.Env(exprhelpers.GetExprEnv(map[string]interface{}{"evt": &types.Event{}})))
+			n.ExprDebugger, err = exprhelpers.NewDebugger(n.Filter, exprhelpers.GetExprOptions(map[string]interface{}{"evt": &types.Event{}})...)
 			if err != nil {
 				log.Errorf("unable to build debug filter for '%s' : %s", n.Filter, err)
 			}
@@ -420,7 +490,7 @@ func (n *Node) compile(pctx *UnixParserCtx, ectx EnricherCtx) error {
 	for _, pattern := range n.SubGroks {
 		n.Logger.Tracef("Adding subpattern '%s' : '%s'", pattern.Key, pattern.Value)
 		if err := pctx.Grok.Add(pattern.Key.(string), pattern.Value.(string)); err != nil {
-			if err == grokky.ErrAlreadyExist {
+			if errors.Is(err, grokky.ErrAlreadyExist) {
 				n.Logger.Warningf("grok '%s' already registred", pattern.Key)
 				continue
 			}
@@ -434,12 +504,12 @@ func (n *Node) compile(pctx *UnixParserCtx, ectx EnricherCtx) error {
 		n.Logger.Tracef("+ Regexp Compilation '%s'", n.Grok.RegexpName)
 		n.Grok.RunTimeRegexp, err = pctx.Grok.Get(n.Grok.RegexpName)
 		if err != nil {
-			return fmt.Errorf("Unable to find grok '%s' : %v", n.Grok.RegexpName, err)
+			return fmt.Errorf("unable to find grok '%s' : %v", n.Grok.RegexpName, err)
 		}
 		if n.Grok.RunTimeRegexp == nil {
-			return fmt.Errorf("Empty grok '%s'", n.Grok.RegexpName)
+			return fmt.Errorf("empty grok '%s'", n.Grok.RegexpName)
 		}
-		n.Logger.Tracef("%s regexp: %s", n.Grok.RegexpName, n.Grok.RunTimeRegexp.Regexp.String())
+		n.Logger.Tracef("%s regexp: %s", n.Grok.RegexpName, n.Grok.RunTimeRegexp.String())
 		valid = true
 	} else if n.Grok.RegexpValue != "" {
 		if strings.HasSuffix(n.Grok.RegexpValue, "\n") {
@@ -447,20 +517,20 @@ func (n *Node) compile(pctx *UnixParserCtx, ectx EnricherCtx) error {
 		}
 		n.Grok.RunTimeRegexp, err = pctx.Grok.Compile(n.Grok.RegexpValue)
 		if err != nil {
-			return fmt.Errorf("Failed to compile grok '%s': %v\n", n.Grok.RegexpValue, err)
+			return fmt.Errorf("failed to compile grok '%s': %v", n.Grok.RegexpValue, err)
 		}
 		if n.Grok.RunTimeRegexp == nil {
 			// We shouldn't be here because compilation succeeded, so regexp shouldn't be nil
-			return fmt.Errorf("Grok compilation failure: %s", n.Grok.RegexpValue)
+			return fmt.Errorf("grok compilation failure: %s", n.Grok.RegexpValue)
 		}
-		n.Logger.Tracef("%s regexp : %s", n.Grok.RegexpValue, n.Grok.RunTimeRegexp.Regexp.String())
+		n.Logger.Tracef("%s regexp : %s", n.Grok.RegexpValue, n.Grok.RunTimeRegexp.String())
 		valid = true
 	}
 
 	/*if grok source is an expression*/
 	if n.Grok.ExpValue != "" {
 		n.Grok.RunTimeValue, err = expr.Compile(n.Grok.ExpValue,
-			expr.Env(exprhelpers.GetExprEnv(map[string]interface{}{"evt": &types.Event{}})))
+			exprhelpers.GetExprOptions(map[string]interface{}{"evt": &types.Event{}})...)
 		if err != nil {
 			return errors.Wrap(err, "while compiling grok's expression")
 		}
@@ -472,7 +542,7 @@ func (n *Node) compile(pctx *UnixParserCtx, ectx EnricherCtx) error {
 		for idx := range n.Grok.Statics {
 			if n.Grok.Statics[idx].ExpValue != "" {
 				n.Grok.Statics[idx].RunTimeValue, err = expr.Compile(n.Grok.Statics[idx].ExpValue,
-					expr.Env(exprhelpers.GetExprEnv(map[string]interface{}{"evt": &types.Event{}})))
+					exprhelpers.GetExprOptions(map[string]interface{}{"evt": &types.Event{}})...)
 				if err != nil {
 					return err
 				}
@@ -480,6 +550,39 @@ func (n *Node) compile(pctx *UnixParserCtx, ectx EnricherCtx) error {
 		}
 		valid = true
 	}
+
+	/* load data capture (stash) */
+	for i, stash := range n.Stash {
+		n.Stash[i].ValueExpression, err = expr.Compile(stash.Value,
+			exprhelpers.GetExprOptions(map[string]interface{}{"evt": &types.Event{}})...)
+		if err != nil {
+			return errors.Wrap(err, "while compiling stash value expression")
+		}
+
+		n.Stash[i].KeyExpression, err = expr.Compile(stash.Key,
+			exprhelpers.GetExprOptions(map[string]interface{}{"evt": &types.Event{}})...)
+		if err != nil {
+			return errors.Wrap(err, "while compiling stash key expression")
+		}
+
+		n.Stash[i].TTLVal, err = time.ParseDuration(stash.TTL)
+		if err != nil {
+			return errors.Wrap(err, "while parsing stash ttl")
+		}
+
+		logLvl := n.Logger.Logger.GetLevel()
+		//init the cache, does it make sense to create it here just to be sure everything is fine ?
+		if err := cache.CacheInit(cache.CacheCfg{
+			Size:     n.Stash[i].MaxMapSize,
+			TTL:      n.Stash[i].TTLVal,
+			Name:     n.Stash[i].Name,
+			Strategy: n.Stash[i].Strategy,
+			LogLevel: &logLvl,
+		}); err != nil {
+			return errors.Wrap(err, "while initializing cache")
+		}
+	}
+
 	/* compile leafs if present */
 	if len(n.LeavesNodes) > 0 {
 		for idx := range n.LeavesNodes {
@@ -504,7 +607,7 @@ func (n *Node) compile(pctx *UnixParserCtx, ectx EnricherCtx) error {
 	/* load statics if present */
 	for idx := range n.Statics {
 		if n.Statics[idx].ExpValue != "" {
-			n.Statics[idx].RunTimeValue, err = expr.Compile(n.Statics[idx].ExpValue, expr.Env(exprhelpers.GetExprEnv(map[string]interface{}{"evt": &types.Event{}})))
+			n.Statics[idx].RunTimeValue, err = expr.Compile(n.Statics[idx].ExpValue, exprhelpers.GetExprOptions(map[string]interface{}{"evt": &types.Event{}})...)
 			if err != nil {
 				n.Logger.Errorf("Statics Compilation failed %v.", err)
 				return err
@@ -529,12 +632,12 @@ func (n *Node) compile(pctx *UnixParserCtx, ectx EnricherCtx) error {
 		valid = true
 	}
 	for _, filter := range n.Whitelist.Exprs {
-		expression := &types.ExprWhitelist{}
-		expression.Filter, err = expr.Compile(filter, expr.Env(exprhelpers.GetExprEnv(map[string]interface{}{"evt": &types.Event{}})))
+		expression := &ExprWhitelist{}
+		expression.Filter, err = expr.Compile(filter, exprhelpers.GetExprOptions(map[string]interface{}{"evt": &types.Event{}})...)
 		if err != nil {
 			n.Logger.Fatalf("Unable to compile whitelist expression '%s' : %v.", filter, err)
 		}
-		expression.ExprDebugger, err = exprhelpers.NewDebugger(filter, expr.Env(exprhelpers.GetExprEnv(map[string]interface{}{"evt": &types.Event{}})))
+		expression.ExprDebugger, err = exprhelpers.NewDebugger(filter, exprhelpers.GetExprOptions(map[string]interface{}{"evt": &types.Event{}})...)
 		if err != nil {
 			log.Errorf("unable to build debug filter for '%s' : %s", filter, err)
 		}

@@ -5,20 +5,48 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/crowdsecurity/crowdsec/pkg/csconfig"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/crowdsecurity/crowdsec/pkg/csconfig"
 )
+
+func purgeItem(hub *csconfig.Hub, target Item) (Item, error) {
+	var hdir = hub.HubDir
+	hubpath := hdir + "/" + target.RemotePath
+
+	// disable hub file
+	if err := os.Remove(hubpath); err != nil {
+		return target, errors.Wrap(err, "while removing file")
+	}
+
+	target.Downloaded = false
+	log.Infof("Removed source file [%s] : %s", target.Name, hubpath)
+	hubIdx[target.Type][target.Name] = target
+	return target, nil
+}
 
 //DisableItem to disable an item managed by the hub, removes the symlink if purge is true
 func DisableItem(hub *csconfig.Hub, target Item, purge bool, force bool) (Item, error) {
 	var tdir = hub.ConfigDir
 	var hdir = hub.HubDir
+	var err error
+
+	if !target.Installed {
+		if purge {
+			target, err = purgeItem(hub, target)
+			if err != nil {
+				return target, err
+			}
+		}
+		return target, nil
+	}
 
 	syml, err := filepath.Abs(tdir + "/" + target.Type + "/" + target.Stage + "/" + target.FileName)
 	if err != nil {
 		return Item{}, err
 	}
+
 	if target.Local {
 		return target, fmt.Errorf("%s isn't managed by hub. Please delete manually", target.Name)
 	}
@@ -90,13 +118,10 @@ func DisableItem(hub *csconfig.Hub, target Item, purge bool, force bool) (Item, 
 	target.Installed = false
 
 	if purge {
-		hubpath := hdir + "/" + target.RemotePath
-		//if purge, disable hub file
-		if err = os.Remove(hubpath); err != nil {
-			return target, errors.Wrap(err, "while removing file")
+		target, err = purgeItem(hub, target)
+		if err != nil {
+			return target, err
 		}
-		target.Downloaded = false
-		log.Infof("Removed source file [%s] : %s", target.Name, hubpath)
 	}
 	hubIdx[target.Type][target.Name] = target
 	return target, nil
@@ -136,38 +161,41 @@ func EnableItem(hub *csconfig.Hub, target Item) (Item, error) {
 		for idx, ptr := range tmp {
 			ptrtype := ItemTypes[idx]
 			for _, p := range ptr {
-				if val, ok := hubIdx[ptrtype][p]; ok {
-					hubIdx[ptrtype][p], err = EnableItem(hub, val)
-					if err != nil {
-						return target, errors.Wrap(err, fmt.Sprintf("while installing %s", p))
-					}
-				} else {
+				val, ok := hubIdx[ptrtype][p]
+				if !ok {
 					return target, fmt.Errorf("required %s %s of %s doesn't exist, abort.", ptrtype, p, target.Name)
+				}
+
+				hubIdx[ptrtype][p], err = EnableItem(hub, val)
+				if err != nil {
+					return target, errors.Wrap(err, fmt.Sprintf("while installing %s", p))
 				}
 			}
 		}
 	}
 
 	// check if file already exists where it should in configdir (eg /etc/crowdsec/collections/)
-	if _, err := os.Lstat(parent_dir + "/" + target.FileName); os.IsNotExist(err) {
-		//tdir+target.RemotePath
-		srcPath, err := filepath.Abs(hdir + "/" + target.RemotePath)
-		if err != nil {
-			return target, errors.Wrap(err, "while getting source path")
-		}
-		dstPath, err := filepath.Abs(parent_dir + "/" + target.FileName)
-		if err != nil {
-			return target, errors.Wrap(err, "while getting destination path")
-		}
-		err = os.Symlink(srcPath, dstPath)
-		if err != nil {
-			return target, errors.Wrap(err, fmt.Sprintf("while creating symlink from %s to %s", srcPath, dstPath))
-		}
-		log.Printf("Enabled %s : %s", target.Type, target.Name)
-	} else {
+	if _, err := os.Lstat(parent_dir + "/" + target.FileName); !os.IsNotExist(err) {
 		log.Printf("%s already exists.", parent_dir+"/"+target.FileName)
 		return target, nil
 	}
+
+	//tdir+target.RemotePath
+	srcPath, err := filepath.Abs(hdir + "/" + target.RemotePath)
+	if err != nil {
+		return target, errors.Wrap(err, "while getting source path")
+	}
+
+	dstPath, err := filepath.Abs(parent_dir + "/" + target.FileName)
+	if err != nil {
+		return target, errors.Wrap(err, "while getting destination path")
+	}
+
+	if err = os.Symlink(srcPath, dstPath); err != nil {
+		return target, errors.Wrap(err, fmt.Sprintf("while creating symlink from %s to %s", srcPath, dstPath))
+	}
+
+	log.Printf("Enabled %s : %s", target.Type, target.Name)
 	target.Installed = true
 	hubIdx[target.Type][target.Name] = target
 	return target, nil

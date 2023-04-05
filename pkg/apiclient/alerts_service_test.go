@@ -37,7 +37,7 @@ func TestAlertsListAsMachine(t *testing.T) {
 	})
 
 	if err != nil {
-		log.Fatalf("new api client: %s", err.Error())
+		log.Fatalf("new api client: %s", err)
 	}
 
 	defer teardown()
@@ -124,7 +124,7 @@ func TestAlertsListAsMachine(t *testing.T) {
 			Capacity:  &tcapacity,
 			CreatedAt: "2020-11-28T10:20:47+01:00",
 			Decisions: []*models.Decision{
-				&models.Decision{
+				{
 					Duration: &tduration,
 					ID:       1,
 					Origin:   &torigin,
@@ -137,7 +137,7 @@ func TestAlertsListAsMachine(t *testing.T) {
 				},
 			},
 			Events: []*models.Event{
-				&models.Event{
+				{
 					Meta: models.Meta{
 						&models.MetaItems0{
 							Key:   "target_user",
@@ -149,8 +149,7 @@ func TestAlertsListAsMachine(t *testing.T) {
 						},
 					},
 					Timestamp: &ttimestamp,
-				},
-				&models.Event{
+				}, {
 					Meta: models.Meta{
 						&models.MetaItems0{
 							Key:   "target_user",
@@ -240,7 +239,7 @@ func TestAlertsGetAsMachine(t *testing.T) {
 	})
 
 	if err != nil {
-		log.Fatalf("new api client: %s", err.Error())
+		log.Fatalf("new api client: %s", err)
 	}
 
 	defer teardown()
@@ -323,7 +322,7 @@ func TestAlertsGetAsMachine(t *testing.T) {
 		Capacity:  &tcapacity,
 		CreatedAt: "2020-11-28T10:20:47+01:00",
 		Decisions: []*models.Decision{
-			&models.Decision{
+			{
 				Duration: &tduration,
 				ID:       1,
 				Origin:   &torigin,
@@ -336,7 +335,7 @@ func TestAlertsGetAsMachine(t *testing.T) {
 			},
 		},
 		Events: []*models.Event{
-			&models.Event{
+			{
 				Meta: models.Meta{
 					&models.MetaItems0{
 						Key:   "target_user",
@@ -348,8 +347,7 @@ func TestAlertsGetAsMachine(t *testing.T) {
 					},
 				},
 				Timestamp: &ttimestamp,
-			},
-			&models.Event{
+			}, {
 				Meta: models.Meta{
 					&models.MetaItems0{
 						Key:   "target_user",
@@ -399,7 +397,7 @@ func TestAlertsGetAsMachine(t *testing.T) {
 	}
 
 	//fail
-	alerts, resp, err = client.Alerts.GetByID(context.Background(), 2)
+	_, _, err = client.Alerts.GetByID(context.Background(), 2)
 	assert.Contains(t, fmt.Sprintf("%s", err), "API error: object not found")
 
 }
@@ -431,7 +429,7 @@ func TestAlertsCreateAsMachine(t *testing.T) {
 	})
 
 	if err != nil {
-		log.Fatalf("new api client: %s", err.Error())
+		log.Fatalf("new api client: %s", err)
 	}
 
 	defer teardown()
@@ -475,7 +473,7 @@ func TestAlertsDeleteAsMachine(t *testing.T) {
 	})
 
 	if err != nil {
-		log.Fatalf("new api client: %s", err.Error())
+		log.Fatalf("new api client: %s", err)
 	}
 
 	defer teardown()
@@ -484,7 +482,7 @@ func TestAlertsDeleteAsMachine(t *testing.T) {
 	alerts, resp, err := client.Alerts.Delete(context.Background(), alert)
 	require.NoError(t, err)
 
-	expected := &models.DeleteAlertsResponse{""}
+	expected := &models.DeleteAlertsResponse{NbDeleted: ""}
 	if resp.Response.StatusCode != http.StatusOK {
 		t.Errorf("Alerts.List returned status: %d, want %d", resp.Response.StatusCode, http.StatusOK)
 	}

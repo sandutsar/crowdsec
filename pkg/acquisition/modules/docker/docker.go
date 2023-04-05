@@ -10,18 +10,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ahmetb/dlog"
-	"github.com/crowdsecurity/crowdsec/pkg/acquisition/configuration"
-	leaky "github.com/crowdsecurity/crowdsec/pkg/leakybucket"
-	"github.com/crowdsecurity/crowdsec/pkg/types"
 	dockerTypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
-
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/tomb.v2"
 	"gopkg.in/yaml.v2"
+
+	"github.com/crowdsecurity/dlog"
+
+	"github.com/crowdsecurity/crowdsec/pkg/acquisition/configuration"
+	"github.com/crowdsecurity/crowdsec/pkg/types"
 )
 
 var linesRead = prometheus.NewCounterVec(
@@ -67,24 +67,26 @@ type ContainerConfig struct {
 	Tty    bool
 }
 
-func (d *DockerSource) Configure(Config []byte, logger *log.Entry) error {
-	var err error
+func (d *DockerSource) GetUuid() string {
+	return d.Config.UniqueId
+}
 
+func (d *DockerSource) UnmarshalConfig(yamlConfig []byte) error {
 	d.Config = DockerConfiguration{
 		FollowStdout:  true, // default
 		FollowStdErr:  true, // default
 		CheckInterval: "1s", // default
 	}
-	d.logger = logger
 
-	d.runningContainerState = make(map[string]*ContainerConfig)
-
-	err = yaml.UnmarshalStrict(Config, &d.Config)
+	err := yaml.UnmarshalStrict(yamlConfig, &d.Config)
 	if err != nil {
 		return errors.Wrap(err, "Cannot parse DockerAcquisition configuration")
 	}
 
-	d.logger.Tracef("DockerAcquisition configuration: %+v", d.Config)
+	if d.logger != nil {
+		d.logger.Tracef("DockerAcquisition configuration: %+v", d.Config)
+	}
+
 	if len(d.Config.ContainerName) == 0 && len(d.Config.ContainerID) == 0 && len(d.Config.ContainerIDRegexp) == 0 && len(d.Config.ContainerNameRegexp) == 0 {
 		return fmt.Errorf("no containers names or containers ID configuration provided")
 	}
@@ -100,7 +102,6 @@ func (d *DockerSource) Configure(Config []byte, logger *log.Entry) error {
 	if d.Config.Mode != configuration.CAT_MODE && d.Config.Mode != configuration.TAIL_MODE {
 		return fmt.Errorf("unsupported mode %s for docker datasource", d.Config.Mode)
 	}
-	d.logger.Tracef("Actual DockerAcquisition configuration %+v", d.Config)
 
 	for _, cont := range d.Config.ContainerNameRegexp {
 		d.compiledContainerName = append(d.compiledContainerName, regexp.MustCompile(cont))
@@ -108,11 +109,6 @@ func (d *DockerSource) Configure(Config []byte, logger *log.Entry) error {
 
 	for _, cont := range d.Config.ContainerIDRegexp {
 		d.compiledContainerID = append(d.compiledContainerID, regexp.MustCompile(cont))
-	}
-
-	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		return err
 	}
 
 	if d.Config.Since == "" {
@@ -130,23 +126,43 @@ func (d *DockerSource) Configure(Config []byte, logger *log.Entry) error {
 		d.containerLogsOptions.Until = d.Config.Until
 	}
 
+	return nil
+}
+
+func (d *DockerSource) Configure(yamlConfig []byte, logger *log.Entry) error {
+	d.logger = logger
+
+	err := d.UnmarshalConfig(yamlConfig)
+	if err != nil {
+		return err
+	}
+
+	d.runningContainerState = make(map[string]*ContainerConfig)
+
+	d.logger.Tracef("Actual DockerAcquisition configuration %+v", d.Config)
+
+	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		return err
+	}
+
 	if d.Config.DockerHost != "" {
-		if err := client.WithHost(d.Config.DockerHost)(dockerClient); err != nil {
+		err = client.WithHost(d.Config.DockerHost)(dockerClient)
+		if err != nil {
 			return err
 		}
 	}
 	d.Client = dockerClient
 
 	_, err = d.Client.Info(context.Background())
-
 	if err != nil {
-		return errors.Wrapf(err, "failed to configure docker datasource %s", d.Config.DockerHost)
+		return fmt.Errorf("failed to configure docker datasource %s: %w", d.Config.DockerHost, err)
 	}
 
 	return nil
 }
 
-func (d *DockerSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry) error {
+func (d *DockerSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry, uuid string) error {
 	var err error
 
 	if !strings.HasPrefix(dsn, d.GetName()+"://") {
@@ -158,6 +174,7 @@ func (d *DockerSource) ConfigureByDSN(dsn string, labels map[string]string, logg
 		FollowStdErr:  true,
 		CheckInterval: "1s",
 	}
+	d.Config.UniqueId = uuid
 	d.Config.ContainerName = make([]string, 0)
 	d.Config.ContainerID = make([]string, 0)
 	d.runningContainerState = make(map[string]*ContainerConfig)
@@ -258,12 +275,12 @@ func (d *DockerSource) GetMode() string {
 	return d.Config.Mode
 }
 
-//SupportedModes returns the supported modes by the acquisition module
+// SupportedModes returns the supported modes by the acquisition module
 func (d *DockerSource) SupportedModes() []string {
 	return []string{configuration.TAIL_MODE, configuration.CAT_MODE}
 }
 
-//OneShotAcquisition reads a set of file and returns when done
+// OneShotAcquisition reads a set of file and returns when done
 func (d *DockerSource) OneShotAcquisition(out chan types.Event, t *tomb.Tomb) error {
 	d.logger.Debug("In oneshot")
 	runningContainer, err := d.Client.ContainerList(context.Background(), dockerTypes.ContainerListOptions{})
@@ -294,21 +311,26 @@ func (d *DockerSource) OneShotAcquisition(out chan types.Event, t *tomb.Tomb) er
 				scanner = bufio.NewScanner(reader)
 			}
 			for scanner.Scan() {
-				line := scanner.Text()
-				if line == "" {
-					continue
+				select {
+				case <-t.Dying():
+					d.logger.Infof("Shutting down reader for container %s", containerConfig.Name)
+				default:
+					line := scanner.Text()
+					if line == "" {
+						continue
+					}
+					l := types.Line{}
+					l.Raw = line
+					l.Labels = d.Config.Labels
+					l.Time = time.Now().UTC()
+					l.Src = containerConfig.Name
+					l.Process = true
+					l.Module = d.GetName()
+					linesRead.With(prometheus.Labels{"source": containerConfig.Name}).Inc()
+					evt := types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: types.TIMEMACHINE}
+					out <- evt
+					d.logger.Debugf("Sent line to parsing: %+v", evt.Line.Raw)
 				}
-				l := types.Line{}
-				l.Raw = line
-				l.Labels = d.Config.Labels
-				l.Time = time.Now().UTC()
-				l.Src = containerConfig.Name
-				l.Process = true
-				l.Module = d.GetName()
-				linesRead.With(prometheus.Labels{"source": containerConfig.Name}).Inc()
-				evt := types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.TIMEMACHINE}
-				out <- evt
-				d.logger.Debugf("Sent line to parsing: %+v", evt.Line.Raw)
 			}
 			err = scanner.Err()
 			if err != nil {
@@ -321,7 +343,7 @@ func (d *DockerSource) OneShotAcquisition(out chan types.Event, t *tomb.Tomb) er
 	t.Kill(nil)
 
 	if !foundOne {
-		return fmt.Errorf("no docker found, can't run one shot acquisition")
+		return fmt.Errorf("no container found named: %s, can't run one shot acquisition", d.Config.ContainerName[0])
 	}
 
 	return nil
@@ -413,7 +435,7 @@ func (d *DockerSource) WatchContainer(monitChan chan *ContainerConfig, deleteCha
 						delete(d.runningContainerState, idx)
 					}
 				} else {
-					log.Errorf("container list err: %s", err.Error())
+					log.Errorf("container list err: %s", err)
 				}
 				continue
 			}
@@ -505,9 +527,9 @@ func (d *DockerSource) TailDocker(container *ContainerConfig, outChan chan types
 			l.Module = d.GetName()
 			var evt types.Event
 			if !d.Config.UseTimeMachine {
-				evt = types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.LIVE}
+				evt = types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: types.LIVE}
 			} else {
-				evt = types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.TIMEMACHINE}
+				evt = types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: types.TIMEMACHINE}
 			}
 			linesRead.With(prometheus.Labels{"source": container.Name}).Inc()
 			outChan <- evt

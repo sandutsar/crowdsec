@@ -3,27 +3,25 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
-	"sort"
-	"strings"
-
 	_ "net/http/pprof"
+	"os"
+	"runtime"
+	"strings"
 	"time"
+
+	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
+	"gopkg.in/tomb.v2"
 
 	"github.com/crowdsecurity/crowdsec/pkg/acquisition"
 	"github.com/crowdsecurity/crowdsec/pkg/csconfig"
 	"github.com/crowdsecurity/crowdsec/pkg/csplugin"
 	"github.com/crowdsecurity/crowdsec/pkg/cwhub"
 	"github.com/crowdsecurity/crowdsec/pkg/cwversion"
+	"github.com/crowdsecurity/crowdsec/pkg/fflag"
 	"github.com/crowdsecurity/crowdsec/pkg/leakybucket"
-	leaky "github.com/crowdsecurity/crowdsec/pkg/leakybucket"
 	"github.com/crowdsecurity/crowdsec/pkg/parser"
 	"github.com/crowdsecurity/crowdsec/pkg/types"
-	"github.com/pkg/errors"
-
-	log "github.com/sirupsen/logrus"
-
-	"gopkg.in/tomb.v2"
 )
 
 var (
@@ -41,21 +39,24 @@ var (
 	/*the state of acquisition*/
 	dataSources []acquisition.DataSource
 	/*the state of the buckets*/
-	holders         []leaky.BucketFactory
-	buckets         *leaky.Buckets
-	outputEventChan chan types.Event //the buckets init returns its own chan that is used for multiplexing
+	holders []leakybucket.BucketFactory
+	buckets *leakybucket.Buckets
+
+	inputLineChan   chan types.Event
+	inputEventChan  chan types.Event
+	outputEventChan chan types.Event // the buckets init returns its own chan that is used for multiplexing
 	/*settings*/
 	lastProcessedItem time.Time /*keep track of last item timestamp in time-machine. it is used to GC buckets when we dump them.*/
 	pluginBroker      csplugin.PluginBroker
 )
-
-const bincoverTesting = false
 
 type Flags struct {
 	ConfigFile     string
 	TraceLevel     bool
 	DebugLevel     bool
 	InfoLevel      bool
+	WarnLevel      bool
+	ErrorLevel     bool
 	PrintVersion   bool
 	SingleFileType string
 	Labels         map[string]string
@@ -64,51 +65,13 @@ type Flags struct {
 	DisableAgent   bool
 	DisableAPI     bool
 	WinSvc         string
+	DisableCAPI    bool
+	Transform      string
 }
 
 type labelsMap map[string]string
 
-// Return new parsers
-// nodes and povfwnodes are already initialized in parser.LoadStages
-func newParsers() *parser.Parsers {
-	parsers := &parser.Parsers{
-		Ctx:             &parser.UnixParserCtx{},
-		Povfwctx:        &parser.UnixParserCtx{},
-		StageFiles:      make([]parser.Stagefile, 0),
-		PovfwStageFiles: make([]parser.Stagefile, 0),
-	}
-	for _, itemType := range []string{cwhub.PARSERS, cwhub.PARSERS_OVFLW} {
-		for _, hubParserItem := range cwhub.GetItemMap(itemType) {
-			if hubParserItem.Installed {
-				stagefile := parser.Stagefile{
-					Filename: hubParserItem.LocalPath,
-					Stage:    hubParserItem.Stage,
-				}
-				if itemType == cwhub.PARSERS {
-					parsers.StageFiles = append(parsers.StageFiles, stagefile)
-				}
-				if itemType == cwhub.PARSERS_OVFLW {
-					parsers.PovfwStageFiles = append(parsers.PovfwStageFiles, stagefile)
-				}
-			}
-		}
-	}
-	if parsers.StageFiles != nil {
-		sort.Slice(parsers.StageFiles, func(i, j int) bool {
-			return parsers.StageFiles[i].Filename < parsers.StageFiles[j].Filename
-		})
-	}
-	if parsers.PovfwStageFiles != nil {
-		sort.Slice(parsers.PovfwStageFiles, func(i, j int) bool {
-			return parsers.PovfwStageFiles[i].Filename < parsers.PovfwStageFiles[j].Filename
-		})
-	}
-
-	return parsers
-}
-
 func LoadBuckets(cConfig *csconfig.Config) error {
-
 	var (
 		err   error
 		files []string
@@ -118,13 +81,13 @@ func LoadBuckets(cConfig *csconfig.Config) error {
 			files = append(files, hubScenarioItem.LocalPath)
 		}
 	}
-	buckets = leaky.NewBuckets()
+	buckets = leakybucket.NewBuckets()
 
 	log.Infof("Loading %d scenario files", len(files))
-	holders, outputEventChan, err = leaky.LoadBuckets(cConfig.Crowdsec, files, &bucketsTomb, buckets)
+	holders, outputEventChan, err = leakybucket.LoadBuckets(cConfig.Crowdsec, files, &bucketsTomb, buckets)
 
 	if err != nil {
-		return fmt.Errorf("Scenario loading failed : %v", err)
+		return fmt.Errorf("scenario loading failed: %v", err)
 	}
 
 	if cConfig.Prometheus != nil && cConfig.Prometheus.Enabled {
@@ -138,30 +101,29 @@ func LoadBuckets(cConfig *csconfig.Config) error {
 func LoadAcquisition(cConfig *csconfig.Config) error {
 	var err error
 
-	if flags.SingleFileType != "" || flags.OneShotDSN != "" {
-		if flags.OneShotDSN == "" || flags.SingleFileType == "" {
-			return fmt.Errorf("-type requires a -dsn argument")
-		}
+	if flags.SingleFileType != "" && flags.OneShotDSN != "" {
 		flags.Labels = labels
 		flags.Labels["type"] = flags.SingleFileType
 
-		dataSources, err = acquisition.LoadAcquisitionFromDSN(flags.OneShotDSN, flags.Labels)
+		dataSources, err = acquisition.LoadAcquisitionFromDSN(flags.OneShotDSN, flags.Labels, flags.Transform)
 		if err != nil {
 			return errors.Wrapf(err, "failed to configure datasource for %s", flags.OneShotDSN)
 		}
 	} else {
 		dataSources, err = acquisition.LoadAcquisitionFromFile(cConfig.Crowdsec)
 		if err != nil {
-			return errors.Wrap(err, "while loading acquisition configuration")
+			return err
 		}
 	}
 
 	return nil
 }
 
-var dumpFolder string
-var dumpStates bool
-var labels = make(labelsMap)
+var (
+	dumpFolder string
+	dumpStates bool
+	labels     = make(labelsMap)
+)
 
 func (l *labelsMap) String() string {
 	return "labels"
@@ -177,25 +139,69 @@ func (l labelsMap) Set(label string) error {
 }
 
 func (f *Flags) Parse() {
-
 	flag.StringVar(&f.ConfigFile, "c", csconfig.DefaultConfigPath("config.yaml"), "configuration file")
 	flag.BoolVar(&f.TraceLevel, "trace", false, "VERY verbose")
-	flag.BoolVar(&f.DebugLevel, "debug", false, "print debug-level on stdout")
-	flag.BoolVar(&f.InfoLevel, "info", false, "print info-level on stdout")
+	flag.BoolVar(&f.DebugLevel, "debug", false, "print debug-level on stderr")
+	flag.BoolVar(&f.InfoLevel, "info", false, "print info-level on stderr")
+	flag.BoolVar(&f.WarnLevel, "warning", false, "print warning-level on stderr")
+	flag.BoolVar(&f.ErrorLevel, "error", false, "print error-level on stderr")
 	flag.BoolVar(&f.PrintVersion, "version", false, "display version")
 	flag.StringVar(&f.OneShotDSN, "dsn", "", "Process a single data source in time-machine")
+	flag.StringVar(&f.Transform, "transform", "", "expr to apply on the event after acquisition")
 	flag.StringVar(&f.SingleFileType, "type", "", "Labels.type for file in time-machine")
 	flag.Var(&labels, "label", "Additional Labels for file in time-machine")
 	flag.BoolVar(&f.TestMode, "t", false, "only test configs")
 	flag.BoolVar(&f.DisableAgent, "no-cs", false, "disable crowdsec agent")
 	flag.BoolVar(&f.DisableAPI, "no-api", false, "disable local API")
+	flag.BoolVar(&f.DisableCAPI, "no-capi", false, "disable communication with Central API")
 	flag.StringVar(&f.WinSvc, "winsvc", "", "Windows service Action : Install, Remove etc..")
 	flag.StringVar(&dumpFolder, "dump-data", "", "dump parsers/buckets raw outputs")
 	flag.Parse()
 }
 
+func newLogLevel(curLevelPtr *log.Level, f *Flags) *log.Level {
+	// mother of all defaults
+	ret := log.InfoLevel
+
+	// keep if already set
+	if curLevelPtr != nil {
+		ret = *curLevelPtr
+	}
+
+	// override from flags
+	switch {
+	case f.TraceLevel:
+		ret = log.TraceLevel
+	case f.DebugLevel:
+		ret = log.DebugLevel
+	case f.InfoLevel:
+		ret = log.InfoLevel
+	case f.WarnLevel:
+		ret = log.WarnLevel
+	case f.ErrorLevel:
+		ret = log.ErrorLevel
+	default:
+	}
+
+	if curLevelPtr != nil && ret == *curLevelPtr {
+		// avoid returning a new ptr to the same value
+		return curLevelPtr
+	}
+	return &ret
+}
+
 // LoadConfig returns a configuration parsed from configuration file
-func LoadConfig(cConfig *csconfig.Config) error {
+func LoadConfig(configFile string, disableAgent bool, disableAPI bool, quiet bool) (*csconfig.Config, error) {
+	cConfig, err := csconfig.NewConfig(configFile, disableAgent, disableAPI, quiet)
+	if err != nil {
+		return nil, err
+	}
+
+	if (cConfig.Common == nil || *cConfig.Common == csconfig.CommonCfg{}) {
+		return nil, fmt.Errorf("unable to load configuration: common section is empty")
+	}
+
+	cConfig.Common.LogLevel = newLogLevel(cConfig.Common.LogLevel, flags)
 
 	if dumpFolder != "" {
 		parser.ParseDump = true
@@ -204,41 +210,63 @@ func LoadConfig(cConfig *csconfig.Config) error {
 		dumpStates = true
 	}
 
+	// Configuration paths are dependency to load crowdsec configuration
+	if err := cConfig.LoadConfigurationPaths(); err != nil {
+		return nil, err
+	}
+
+	if flags.SingleFileType != "" && flags.OneShotDSN != "" {
+		// if we're in time-machine mode, we don't want to log to file
+		cConfig.Common.LogMedia = "stdout"
+	}
+
+	// Configure logging
+	if err := types.SetDefaultLoggerConfig(cConfig.Common.LogMedia,
+		cConfig.Common.LogDir, *cConfig.Common.LogLevel,
+		cConfig.Common.LogMaxSize, cConfig.Common.LogMaxFiles,
+		cConfig.Common.LogMaxAge, cConfig.Common.CompressLogs,
+		cConfig.Common.ForceColorLogs); err != nil {
+		return nil, err
+	}
+
+	if err := csconfig.LoadFeatureFlagsFile(configFile, log.StandardLogger()); err != nil {
+		return nil, err
+	}
+
 	if !flags.DisableAgent {
 		if err := cConfig.LoadCrowdsec(); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	if !flags.DisableAPI {
 		if err := cConfig.LoadAPIServer(); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	if !cConfig.DisableAgent && (cConfig.API == nil || cConfig.API.Client == nil || cConfig.API.Client.Credentials == nil) {
-		log.Fatalf("missing local API credentials for crowdsec agent, abort")
+		return nil, errors.New("missing local API credentials for crowdsec agent, abort")
 	}
 
 	if cConfig.DisableAPI && cConfig.DisableAgent {
-		log.Fatalf("You must run at least the API Server or crowdsec")
-	}
-
-	if flags.DebugLevel {
-		logLevel := log.DebugLevel
-		cConfig.Common.LogLevel = &logLevel
-	}
-	if flags.InfoLevel || cConfig.Common.LogLevel == nil {
-		logLevel := log.InfoLevel
-		cConfig.Common.LogLevel = &logLevel
-	}
-	if flags.TraceLevel {
-		logLevel := log.TraceLevel
-		cConfig.Common.LogLevel = &logLevel
+		return nil, errors.New("You must run at least the API Server or crowdsec")
 	}
 
 	if flags.TestMode && !cConfig.DisableAgent {
 		cConfig.Crowdsec.LintOnly = true
+	}
+
+	if flags.OneShotDSN != "" && flags.SingleFileType == "" {
+		return nil, errors.New("-dsn requires a -type argument")
+	}
+
+	if flags.Transform != "" && flags.OneShotDSN == "" {
+		return nil, errors.New("-transform requires a -dsn argument")
+	}
+
+	if flags.SingleFileType != "" && flags.OneShotDSN == "" {
+		return nil, errors.New("-type requires a -dsn argument")
 	}
 
 	if flags.SingleFileType != "" && flags.OneShotDSN != "" {
@@ -249,7 +277,6 @@ func LoadConfig(cConfig *csconfig.Config) error {
 		if flags.DisableAPI {
 			cConfig.Common.Daemonize = false
 		}
-		cConfig.Common.LogMedia = "stdout"
 		log.Infof("single file mode : log_media=%s daemonize=%t", cConfig.Common.LogMedia, cConfig.Common.Daemonize)
 	}
 
@@ -257,21 +284,58 @@ func LoadConfig(cConfig *csconfig.Config) error {
 		log.Warn("Deprecation warning: the pid_dir config can be safely removed and is not required")
 	}
 
-	return nil
+	if cConfig.Common.Daemonize && runtime.GOOS == "windows" {
+		log.Debug("Daemonization is not supported on Windows, disabling")
+		cConfig.Common.Daemonize = false
+	}
+
+	// recap of the enabled feature flags, because logging
+	// was not enabled when we set them from envvars
+	if fflist := csconfig.ListFeatureFlags(); fflist != "" {
+		log.Infof("Enabled feature flags: %s", fflist)
+	}
+
+	return cConfig, nil
 }
 
-func main() {
+// crowdsecT0 can be used to measure start time of services,
+// or uptime of the application
+var crowdsecT0 time.Time
 
-	defer types.CatchPanic("crowdsec/main")
+func main() {
+	if err := fflag.RegisterAllFeatures(); err != nil {
+		log.Fatalf("failed to register features: %s", err)
+	}
+
+	// some features can require configuration or command-line options,
+	// so wwe need to parse them asap. we'll load from feature.yaml later.
+	if err := csconfig.LoadFeatureFlagsEnv(log.StandardLogger()); err != nil {
+		log.Fatalf("failed to set feature flags from environment: %s", err)
+	}
+
+	crowdsecT0 = time.Now()
 
 	log.Debugf("os.Args: %v", os.Args)
 
 	// Handle command line arguments
 	flags = &Flags{}
 	flags.Parse()
+
+	if len(flag.Args()) > 0 {
+		fmt.Fprintf(os.Stderr, "argument provided but not defined: %s\n", flag.Args()[0])
+		flag.Usage()
+		// the flag package exits with 2 in case of unknown flag
+		os.Exit(2)
+	}
+
 	if flags.PrintVersion {
 		cwversion.Show()
 		os.Exit(0)
 	}
-	StartRunSvc()
+
+	err := StartRunSvc()
+	if err != nil {
+		log.Fatal(err)
+	}
+	os.Exit(0)
 }

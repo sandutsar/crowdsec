@@ -1,11 +1,13 @@
 package types
 
 import (
+	"time"
+
 	"github.com/antonmedv/expr/vm"
 	"github.com/crowdsecurity/grokky"
 )
 
-//Used mostly for statics
+// Used mostly for statics
 type ExtraField struct {
 	//if the target is indicated by name Struct.Field etc,
 	TargetByName string `yaml:"target,omitempty"`
@@ -32,10 +34,22 @@ type GrokPattern struct {
 	//a proper grok pattern
 	RegexpValue string `yaml:"pattern,omitempty"`
 	//the runtime form of regexpname / regexpvalue
-	RunTimeRegexp *grokky.Pattern `json:"-"` //the actual regexp
+	RunTimeRegexp grokky.Pattern `json:"-"` //the actual regexp
 	//the output of the expression is going to be the source for regexp
 	ExpValue     string      `yaml:"expression,omitempty"`
 	RunTimeValue *vm.Program `json:"-"` //the actual compiled filter
 	//a grok can contain statics that apply if pattern is successful
 	Statics []ExtraField `yaml:"statics,omitempty"`
+}
+
+type DataCapture struct {
+	Name            string        `yaml:"name,omitempty"`
+	Key             string        `yaml:"key,omitempty"`
+	KeyExpression   *vm.Program   `yaml:"-"`
+	Value           string        `yaml:"value,omitempty"`
+	ValueExpression *vm.Program   `yaml:"-"`
+	TTL             string        `yaml:"ttl,omitempty"`
+	TTLVal          time.Duration `yaml:"-"`
+	MaxMapSize      int           `yaml:"size,omitempty"`
+	Strategy        string        `yaml:"strategy,omitempty"`
 }

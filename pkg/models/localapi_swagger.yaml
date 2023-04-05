@@ -242,6 +242,11 @@ paths:
           required: false
           type: string
           description: range to search for (shorthand for scope=range&value=)
+        - name: scenario
+          in: query
+          required: false
+          type: string
+          description: scenario to search
       responses:
         '200':
           description: successful operation
@@ -256,7 +261,7 @@ paths:
       - JWTAuthorizer: []
   '/decisions/{decision_id}':
     delete:
-      description: Delete decision for given ban ID (only from cscli)
+      description: Delete decision for given decision ID (only from cscli)
       summary: DeleteDecision
       tags:
         - watchers
@@ -652,6 +657,33 @@ paths:
           description: "400 response"
       security:
       - JWTAuthorizer: []
+    delete:
+      description: Delete alert for given alert ID (only from cscli)
+      summary: DeleteAlert
+      tags:
+        - watchers
+      operationId: DeleteAlert
+      deprecated: false
+      produces:
+        - application/json
+      parameters:
+        - name: alert_id
+          in: path
+          required: true
+          type: string
+          description: ''
+      responses:
+        '200':
+          description: successful operation
+          schema:
+            $ref: '#/definitions/DeleteAlertsResponse'
+          headers: {}
+        '404':
+          description: "404 response"
+          schema:
+            $ref: "#/definitions/ErrorResponse"
+      security:
+      - JWTAuthorizer: []
 definitions:
   WatcherRegistrationRequest:
     title: WatcherRegistrationRequest
@@ -701,8 +733,12 @@ definitions:
         description: 'only relevant for GET, ignored in POST requests'
         type: integer
         readOnly: true
+      uuid:
+        description: 'only relevant for LAPI->CAPI, ignored for cscli->LAPI and crowdsec->LAPI'
+        type: string
+        readOnly: true
       machine_id:
-        description: 'only relevant for APIL->APIC, ignored for cscli->APIL and crowdsec->APIL'
+        description: 'only relevant for LAPI->CAPI, ignored for cscli->LAPI and crowdsec->LAPI'
         type: string
         readOnly: true
       created_at:
@@ -858,6 +894,10 @@ definitions:
         description: (only relevant for GET ops) the unique id
         type: integer
         readOnly: true
+      uuid:
+        description: 'only relevant for LAPI->CAPI, ignored for cscli->LAPI and crowdsec->LAPI'
+        type: string
+        readOnly: true
       origin:
         description: 'the origin of the decision : cscli, crowdsec'
         type: string
@@ -967,46 +1007,6 @@ definitions:
         description: "more detail on individual errors"
     title: "error response"
     description: "error response return by the API"
-  AddSignalsRequest:
-    title: "add signals request"
-    type: "array"
-    description: "All signals request model"
-    items:
-      $ref: "#/definitions/AddSignalsRequestItem"
-  AddSignalsRequestItem:
-    type: "object"
-    required:
-    - "message"
-    - "scenario"
-    - "scenario_hash"
-    - "scenario_version"
-    - "source"
-    - "start_at"
-    - "stop_at"
-    - "scenario_trust"
-    properties:
-      scenario_hash:
-        type: "string"
-      scenario:
-        type: "string"
-      created_at:
-        type: "string"
-      machine_id:
-        type: "string"
-      source:
-        $ref: "#/definitions/Source"
-      scenario_version:
-        type: "string"
-      scenario_trust:
-        type: "string"
-      message:
-        type: "string"
-        description: "a human readable message"
-      start_at:
-        type: "string"
-      stop_at:
-        type: "string"
-    title: "Signal"
 tags:
   - name: bouncers
     description: 'Operations about decisions : bans, captcha, rate-limit etc.'

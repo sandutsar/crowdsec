@@ -7,8 +7,7 @@ package parser
 */
 
 import (
-	//"fmt"
-
+	"errors"
 	"fmt"
 	"io"
 	_ "net/http/pprof"
@@ -17,13 +16,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goombaio/namegenerator"
+	log "github.com/sirupsen/logrus"
+	yaml "gopkg.in/yaml.v2"
+
 	"github.com/crowdsecurity/crowdsec/pkg/cwversion"
 	"github.com/crowdsecurity/crowdsec/pkg/exprhelpers"
-
-	log "github.com/sirupsen/logrus"
-
-	"github.com/goombaio/namegenerator"
-	yaml "gopkg.in/yaml.v2"
 )
 
 var seed namegenerator.Generator = namegenerator.NewNameGenerator(time.Now().UTC().UnixNano())
@@ -43,7 +41,7 @@ func LoadStages(stageFiles []Stagefile, pctx *UnixParserCtx, ectx EnricherCtx) (
 	pctx.Stages = []string{}
 
 	for _, stageFile := range stageFiles {
-		if !strings.HasSuffix(stageFile.Filename, ".yaml") {
+		if !strings.HasSuffix(stageFile.Filename, ".yaml") && !strings.HasSuffix(stageFile.Filename, ".yml") {
 			log.Warningf("skip non yaml : %s", stageFile.Filename)
 			continue
 		}
@@ -65,10 +63,10 @@ func LoadStages(stageFiles []Stagefile, pctx *UnixParserCtx, ectx EnricherCtx) (
 		nodesCount := 0
 		for {
 			node := Node{}
-			node.OnSuccess = "continue" //default behaviour is to continue
+			node.OnSuccess = "continue" //default behavior is to continue
 			err = dec.Decode(&node)
 			if err != nil {
-				if err == io.EOF {
+				if errors.Is(err, io.EOF) {
 					log.Tracef("End of yaml file")
 					break
 				}
@@ -102,9 +100,9 @@ func LoadStages(stageFiles []Stagefile, pctx *UnixParserCtx, ectx EnricherCtx) (
 			err = node.compile(pctx, ectx)
 			if err != nil {
 				if node.Name != "" {
-					return nil, fmt.Errorf("failed to compile node '%s' in '%s' : %s", node.Name, stageFile.Filename, err.Error())
+					return nil, fmt.Errorf("failed to compile node '%s' in '%s' : %s", node.Name, stageFile.Filename, err)
 				}
-				return nil, fmt.Errorf("failed to compile node in '%s' : %s", stageFile.Filename, err.Error())
+				return nil, fmt.Errorf("failed to compile node in '%s' : %s", stageFile.Filename, err)
 			}
 			/* if the stage is empty, the node is empty, it's a trailing entry in users yaml file */
 			if node.Stage == "" {
@@ -115,21 +113,24 @@ func LoadStages(stageFiles []Stagefile, pctx *UnixParserCtx, ectx EnricherCtx) (
 				for _, data := range node.Data {
 					err = exprhelpers.FileInit(pctx.DataFolder, data.DestPath, data.Type)
 					if err != nil {
-						log.Errorf(err.Error())
+						log.Error(err)
+					}
+					if data.Type == "regexp" { //cache only makes sense for regexp
+						exprhelpers.RegexpCacheInit(data.DestPath, *data)
 					}
 				}
 			}
 			nodes = append(nodes, node)
 			nodesCount++
 		}
-		log.WithFields(log.Fields{"file": stageFile.Filename}).Infof("Loaded %d parser nodes", nodesCount)
+		log.WithFields(log.Fields{"file": stageFile.Filename, "stage": stageFile.Stage}).Infof("Loaded %d parser nodes", nodesCount)
 	}
 
 	for k := range tmpstages {
 		pctx.Stages = append(pctx.Stages, k)
 	}
 	sort.Strings(pctx.Stages)
-	log.Infof("Loaded %d nodes, %d stages", len(nodes), len(pctx.Stages))
+	log.Infof("Loaded %d nodes from %d stages", len(nodes), len(pctx.Stages))
 
 	return nodes, nil
 }

@@ -3,9 +3,27 @@ package parser
 import (
 	"time"
 
+	expr "github.com/crowdsecurity/crowdsec/pkg/exprhelpers"
 	"github.com/crowdsecurity/crowdsec/pkg/types"
 	log "github.com/sirupsen/logrus"
 )
+
+func parseDateWithFormat(date, format string) (string, time.Time) {
+	t, err := time.Parse(format, date)
+	if err == nil && !t.IsZero() {
+		//if the year isn't set, set it to current date :)
+		if t.Year() == 0 {
+			t = t.AddDate(time.Now().UTC().Year(), 0, 0)
+		}
+		retstr, err := t.MarshalText()
+		if err != nil {
+			log.Warningf("Failed marshaling '%v'", t)
+			return "", time.Time{}
+		}
+		return string(retstr), t
+	}
+	return "", time.Time{}
+}
 
 func GenDateParse(date string) (string, time.Time) {
 	var (
@@ -29,40 +47,62 @@ func GenDateParse(date string) (string, time.Time) {
 	)
 
 	for _, dateFormat := range layouts {
-		t, err := time.Parse(dateFormat, date)
-		if err == nil && !t.IsZero() {
-			//if the year isn't set, set it to current date :)
-			if t.Year() == 0 {
-				t = t.AddDate(time.Now().UTC().Year(), 0, 0)
-			}
-			retstr, err := t.MarshalText()
-			if err != nil {
-				log.Warningf("Failed marshaling '%v'", t)
-				continue
-			}
-			return string(retstr), t
+		retstr, parsedDate := parseDateWithFormat(date, dateFormat)
+		if !parsedDate.IsZero() {
+			return retstr, parsedDate
 		}
 	}
+	return "", time.Time{}
+}
 
+func ParseDate(in string, p *types.Event, x interface{}, plog *log.Entry) (map[string]string, error) {
+
+	var ret = make(map[string]string)
+	var strDate string
+	var parsedDate time.Time
+	if in != "" {
+		if p.StrTimeFormat != "" {
+			strDate, parsedDate = parseDateWithFormat(in, p.StrTimeFormat)
+			if !parsedDate.IsZero() {
+				ret["MarshaledTime"] = strDate
+				//In time machine, we take the time parsed from the event. In live mode, we keep the timestamp collected at acquisition
+				if p.ExpectMode == types.TIMEMACHINE {
+					p.Time = parsedDate
+				}
+				return ret, nil
+			}
+			plog.Debugf("unable to parse '%s' with layout '%s'", in, p.StrTimeFormat)
+		}
+		strDate, parsedDate = GenDateParse(in)
+		if !parsedDate.IsZero() {
+			ret["MarshaledTime"] = strDate
+			//In time machine, we take the time parsed from the event. In live mode, we keep the timestamp collected at acquisition
+			if p.ExpectMode == types.TIMEMACHINE {
+				p.Time = parsedDate
+			}
+			return ret, nil
+		}
+		timeobj, err := expr.ParseUnixTime(in)
+		if err == nil {
+			ret["MarshaledTime"] = timeobj.(time.Time).Format(time.RFC3339)
+			//In time machine, we take the time parsed from the event. In live mode, we keep the timestamp collected at acquisition
+			if p.ExpectMode == types.TIMEMACHINE {
+				p.Time = timeobj.(time.Time)
+			}
+			return ret, nil
+		}
+
+	}
+	plog.Debugf("no suitable date format found for '%s', falling back to now", in)
 	now := time.Now().UTC()
 	retstr, err := now.MarshalText()
 	if err != nil {
-		log.Warningf("Failed marshaling current time")
-		return "", time.Time{}
+		plog.Warning("Failed marshaling current time")
+		return ret, err
 	}
-	return string(retstr), now
-}
+	ret["MarshaledTime"] = string(retstr)
 
-func ParseDate(in string, p *types.Event, x interface{}) (map[string]string, error) {
-
-	var ret map[string]string = make(map[string]string)
-	tstr, tbin := GenDateParse(in)
-	if !tbin.IsZero() {
-		ret["MarshaledTime"] = string(tstr)
-		return ret, nil
-	}
-
-	return nil, nil
+	return ret, nil
 }
 
 func parseDateInit(cfg map[string]string) (interface{}, error) {

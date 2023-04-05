@@ -9,12 +9,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/crowdsecurity/crowdsec/pkg/acquisition/configuration"
-	leaky "github.com/crowdsecurity/crowdsec/pkg/leakybucket"
-	"github.com/crowdsecurity/crowdsec/pkg/types"
 	"github.com/fsnotify/fsnotify"
 	"github.com/nxadm/tail"
 	"github.com/pkg/errors"
@@ -22,6 +21,9 @@ import (
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/tomb.v2"
 	"gopkg.in/yaml.v2"
+
+	"github.com/crowdsecurity/crowdsec/pkg/acquisition/configuration"
+	"github.com/crowdsecurity/crowdsec/pkg/types"
 )
 
 var linesRead = prometheus.NewCounterVec(
@@ -33,8 +35,10 @@ var linesRead = prometheus.NewCounterVec(
 
 type FileConfiguration struct {
 	Filenames                         []string
+	ExcludeRegexps                    []string `yaml:"exclude_regexps"`
 	Filename                          string
 	ForceInotify                      bool `yaml:"force_inotify"`
+	MaxBufferSize                     int  `yaml:"max_buffer_size"`
 	configuration.DataSourceCommonCfg `yaml:",inline"`
 }
 
@@ -45,36 +49,69 @@ type FileSource struct {
 	tails              map[string]bool
 	logger             *log.Entry
 	files              []string
+	exclude_regexps    []*regexp.Regexp
 }
 
-func (f *FileSource) Configure(Config []byte, logger *log.Entry) error {
-	fileConfig := FileConfiguration{}
-	f.logger = logger
-	f.watchedDirectories = make(map[string]bool)
-	f.tails = make(map[string]bool)
-	err := yaml.UnmarshalStrict(Config, &fileConfig)
+func (f *FileSource) GetUuid() string {
+	return f.config.UniqueId
+}
+
+func (f *FileSource) UnmarshalConfig(yamlConfig []byte) error {
+	f.config = FileConfiguration{}
+	err := yaml.UnmarshalStrict(yamlConfig, &f.config)
 	if err != nil {
-		return errors.Wrap(err, "Cannot parse FileAcquisition configuration")
+		return fmt.Errorf("cannot parse FileAcquisition configuration: %w", err)
 	}
-	f.logger.Tracef("FileAcquisition configuration: %+v", fileConfig)
-	if len(fileConfig.Filename) != 0 {
-		fileConfig.Filenames = append(fileConfig.Filenames, fileConfig.Filename)
+
+	if f.logger != nil {
+		f.logger.Tracef("FileAcquisition configuration: %+v", f.config)
 	}
-	if len(fileConfig.Filenames) == 0 {
+
+	if len(f.config.Filename) != 0 {
+		f.config.Filenames = append(f.config.Filenames, f.config.Filename)
+	}
+
+	if len(f.config.Filenames) == 0 {
 		return fmt.Errorf("no filename or filenames configuration provided")
 	}
-	f.config = fileConfig
+
 	if f.config.Mode == "" {
 		f.config.Mode = configuration.TAIL_MODE
 	}
+
 	if f.config.Mode != configuration.CAT_MODE && f.config.Mode != configuration.TAIL_MODE {
 		return fmt.Errorf("unsupported mode %s for file source", f.config.Mode)
 	}
+
+	for _, exclude := range f.config.ExcludeRegexps {
+		re, err := regexp.Compile(exclude)
+		if err != nil {
+			return fmt.Errorf("could not compile regexp %s: %w", exclude, err)
+		}
+		f.exclude_regexps = append(f.exclude_regexps, re)
+	}
+
+	return nil
+}
+
+func (f *FileSource) Configure(yamlConfig []byte, logger *log.Entry) error {
+	f.logger = logger
+
+	err := f.UnmarshalConfig(yamlConfig)
+	if err != nil {
+		return err
+	}
+
+	f.watchedDirectories = make(map[string]bool)
+	f.tails = make(map[string]bool)
+
 	f.watcher, err = fsnotify.NewWatcher()
 	if err != nil {
 		return errors.Wrapf(err, "Could not create fsnotify watcher")
 	}
+
 	f.logger.Tracef("Actual FileAcquisition Configuration %+v", f.config)
+
 	for _, pattern := range f.config.Filenames {
 		if f.config.ForceInotify {
 			directory := filepath.Dir(pattern)
@@ -97,6 +134,19 @@ func (f *FileSource) Configure(Config []byte, logger *log.Entry) error {
 			continue
 		}
 		for _, file := range files {
+
+			//check if file is excluded
+			excluded := false
+			for _, pattern := range f.exclude_regexps {
+				if pattern.MatchString(file) {
+					excluded = true
+					f.logger.Infof("Skipping file %s as it matches exclude pattern %s", file, pattern)
+					break
+				}
+			}
+			if excluded {
+				continue
+			}
 			if files[0] != pattern && f.config.Mode == configuration.TAIL_MODE { //we have a glob pattern
 				directory := filepath.Dir(file)
 				f.logger.Debugf("Will add watch to directory: %s", directory)
@@ -119,12 +169,13 @@ func (f *FileSource) Configure(Config []byte, logger *log.Entry) error {
 	return nil
 }
 
-func (f *FileSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry) error {
+func (f *FileSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry, uuid string) error {
 	if !strings.HasPrefix(dsn, "file://") {
 		return fmt.Errorf("invalid DSN %s for file source, must start with file://", dsn)
 	}
 
 	f.logger = logger
+	f.config = FileConfiguration{}
 
 	dsn = strings.TrimPrefix(dsn, "file://")
 
@@ -137,26 +188,37 @@ func (f *FileSource) ConfigureByDSN(dsn string, labels map[string]string, logger
 	if len(args) == 2 && len(args[1]) != 0 {
 		params, err := url.ParseQuery(args[1])
 		if err != nil {
-			return fmt.Errorf("could not parse file args : %s", err)
+			return errors.Wrap(err, "could not parse file args")
 		}
 		for key, value := range params {
-			if key != "log_level" {
-				return fmt.Errorf("unsupported key %s in file DSN", key)
+			switch key {
+			case "log_level":
+				if len(value) != 1 {
+					return errors.New("expected zero or one value for 'log_level'")
+				}
+				lvl, err := log.ParseLevel(value[0])
+				if err != nil {
+					return errors.Wrapf(err, "unknown level %s", value[0])
+				}
+				f.logger.Logger.SetLevel(lvl)
+			case "max_buffer_size":
+				if len(value) != 1 {
+					return errors.New("expected zero or one value for 'max_buffer_size'")
+				}
+				maxBufferSize, err := strconv.Atoi(value[0])
+				if err != nil {
+					return errors.Wrapf(err, "could not parse max_buffer_size %s", value[0])
+				}
+				f.config.MaxBufferSize = maxBufferSize
+			default:
+				return fmt.Errorf("unknown parameter %s", key)
 			}
-			if len(value) != 1 {
-				return fmt.Errorf("expected zero or one value for 'log_level'")
-			}
-			lvl, err := log.ParseLevel(value[0])
-			if err != nil {
-				return errors.Wrapf(err, "unknown level %s", value[0])
-			}
-			f.logger.Logger.SetLevel(lvl)
 		}
 	}
 
-	f.config = FileConfiguration{}
 	f.config.Labels = labels
 	f.config.Mode = configuration.CAT_MODE
+	f.config.UniqueId = uuid
 
 	f.logger.Debugf("Will try pattern %s", args[0])
 	files, err := filepath.Glob(args[0])
@@ -183,12 +245,12 @@ func (f *FileSource) GetMode() string {
 	return f.config.Mode
 }
 
-//SupportedModes returns the supported modes by the acquisition module
+// SupportedModes returns the supported modes by the acquisition module
 func (f *FileSource) SupportedModes() []string {
 	return []string{configuration.TAIL_MODE, configuration.CAT_MODE}
 }
 
-//OneShotAcquisition reads a set of file and returns when done
+// OneShotAcquisition reads a set of file and returns when done
 func (f *FileSource) OneShotAcquisition(out chan types.Event, t *tomb.Tomb) error {
 	f.logger.Debug("In oneshot")
 	for _, file := range f.files {
@@ -232,6 +294,19 @@ func (f *FileSource) StreamingAcquisition(out chan types.Event, t *tomb.Tomb) er
 		return f.monitorNewFiles(out, t)
 	})
 	for _, file := range f.files {
+		//before opening the file, check if we need to specifically avoid it. (XXX)
+		skip := false
+		for _, pattern := range f.exclude_regexps {
+			if pattern.MatchString(file) {
+				f.logger.Infof("file %s matches exclusion pattern %s, skipping", file, pattern.String())
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
 		//cf. https://github.com/crowdsecurity/crowdsec/issues/1168
 		//do not rely on stat, reclose file immediately as it's opened by Tail
 		fd, err := os.Open(file)
@@ -252,7 +327,8 @@ func (f *FileSource) StreamingAcquisition(out chan types.Event, t *tomb.Tomb) er
 			f.logger.Warnf("%s is a directory, ignoring it.", file)
 			continue
 		}
-		tail, err := tail.TailFile(file, tail.Config{ReOpen: true, Follow: true, Poll: true, Location: &tail.SeekInfo{Offset: 0, Whence: io.SeekEnd}})
+
+		tail, err := tail.TailFile(file, tail.Config{ReOpen: true, Follow: true, Poll: true, Location: &tail.SeekInfo{Offset: 0, Whence: io.SeekEnd}, Logger: log.NewEntry(log.StandardLogger())})
 		if err != nil {
 			f.logger.Errorf("Could not start tailing file %s : %s", file, err)
 			continue
@@ -304,6 +380,20 @@ func (f *FileSource) monitorNewFiles(out chan types.Event, t *tomb.Tomb) error {
 				if !matched {
 					continue
 				}
+
+				//before opening the file, check if we need to specifically avoid it. (XXX)
+				skip := false
+				for _, pattern := range f.exclude_regexps {
+					if pattern.MatchString(event.Name) {
+						f.logger.Infof("file %s matches exclusion pattern %s, skipping", event.Name, pattern.String())
+						skip = true
+						break
+					}
+				}
+				if skip {
+					continue
+				}
+
 				if f.tails[event.Name] {
 					//we already have a tail on it, do not start a new one
 					logger.Debugf("Already tailing file %s, not creating a new tail", event.Name)
@@ -351,7 +441,6 @@ func (f *FileSource) tailFile(out chan types.Event, t *tomb.Tomb, tail *tail.Tai
 	logger := f.logger.WithField("tail", tail.Filename)
 	logger.Debugf("-> Starting tail of %s", tail.Filename)
 	for {
-		l := types.Line{}
 		select {
 		case <-t.Dying():
 			logger.Infof("File datasource %s stopping", tail.Filename)
@@ -360,14 +449,14 @@ func (f *FileSource) tailFile(out chan types.Event, t *tomb.Tomb, tail *tail.Tai
 				return err
 			}
 			return nil
-		case <-tail.Tomb.Dying(): //our tailer is dying
+		case <-tail.Dying(): //our tailer is dying
 			logger.Warningf("File reader of %s died", tail.Filename)
 			t.Kill(fmt.Errorf("dead reader for %s", tail.Filename))
 			return fmt.Errorf("reader for %s is dead", tail.Filename)
 		case line := <-tail.Lines:
 			if line == nil {
-				logger.Debugf("Nil line")
-				return fmt.Errorf("tail for %s is empty", tail.Filename)
+				logger.Warningf("tail for %s is empty", tail.Filename)
+				continue
 			}
 			if line.Err != nil {
 				logger.Warningf("fetch error : %v", line.Err)
@@ -377,19 +466,22 @@ func (f *FileSource) tailFile(out chan types.Event, t *tomb.Tomb, tail *tail.Tai
 				continue
 			}
 			linesRead.With(prometheus.Labels{"source": tail.Filename}).Inc()
-			l.Raw = trimLine(line.Text)
-			l.Labels = f.config.Labels
-			l.Time = line.Time
-			l.Src = tail.Filename
-			l.Process = true
-			l.Module = f.GetName()
+			l := types.Line{
+				Raw:     trimLine(line.Text),
+				Labels:  f.config.Labels,
+				Time:    line.Time,
+				Src:     tail.Filename,
+				Process: true,
+				Module:  f.GetName(),
+			}
 			//we're tailing, it must be real time logs
 			logger.Debugf("pushing %+v", l)
-			if !f.config.UseTimeMachine {
-				out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.LIVE}
-			} else {
-				out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.TIMEMACHINE}
+
+			expectMode := types.LIVE
+			if f.config.UseTimeMachine {
+				expectMode = types.TIMEMACHINE
 			}
+			out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: expectMode}
 		}
 	}
 }
@@ -417,22 +509,38 @@ func (f *FileSource) readFile(filename string, out chan types.Event, t *tomb.Tom
 		scanner = bufio.NewScanner(fd)
 	}
 	scanner.Split(bufio.ScanLines)
+	if f.config.MaxBufferSize > 0 {
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, f.config.MaxBufferSize)
+	}
 	for scanner.Scan() {
-		if scanner.Text() == "" {
-			continue
-		}
-		logger.Debugf("line %s", scanner.Text())
-		l := types.Line{}
-		l.Raw = scanner.Text()
-		l.Time = time.Now().UTC()
-		l.Src = filename
-		l.Labels = f.config.Labels
-		l.Process = true
-		l.Module = f.GetName()
-		linesRead.With(prometheus.Labels{"source": filename}).Inc()
+		select {
+		case <-t.Dying():
+			logger.Infof("File datasource %s stopping", filename)
+			return nil
+		default:
+			if scanner.Text() == "" {
+				continue
+			}
+			l := types.Line{
+				Raw:     scanner.Text(),
+				Time:    time.Now().UTC(),
+				Src:     filename,
+				Labels:  f.config.Labels,
+				Process: true,
+				Module:  f.GetName(),
+			}
+			logger.Debugf("line %s", l.Raw)
+			linesRead.With(prometheus.Labels{"source": filename}).Inc()
 
-		//we're reading logs at once, it must be time-machine buckets
-		out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.TIMEMACHINE}
+			//we're reading logs at once, it must be time-machine buckets
+			out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: types.TIMEMACHINE}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		logger.Errorf("Error while reading file: %s", err)
+		t.Kill(err)
+		return err
 	}
 	t.Kill(nil)
 	return nil

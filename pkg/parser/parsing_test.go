@@ -2,10 +2,10 @@ package parser
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
 	"os"
 	"sort"
 	"strings"
@@ -39,7 +39,7 @@ func TestParser(t *testing.T) {
 			t.Fatalf("Test '%s' failed : %s", envSetting, err)
 		}
 	} else {
-		fds, err := ioutil.ReadDir("./tests/")
+		fds, err := os.ReadDir("./tests/")
 		if err != nil {
 			t.Fatalf("Unable to read test directory : %s", err)
 		}
@@ -72,7 +72,7 @@ func BenchmarkParser(t *testing.B) {
 			t.Fatalf("Test '%s' failed : %s", envSetting, err)
 		}
 	} else {
-		fds, err := ioutil.ReadDir("./tests/")
+		fds, err := os.ReadDir("./tests/")
 		if err != nil {
 			t.Fatalf("Unable to read test directory : %s", err)
 		}
@@ -99,7 +99,7 @@ func testOneParser(pctx *UnixParserCtx, ectx EnricherCtx, dir string, b *testing
 	)
 	log.Warningf("testing %s", dir)
 	parser_cfg_file := fmt.Sprintf("%s/parsers.yaml", dir)
-	cfg, err := ioutil.ReadFile(parser_cfg_file)
+	cfg, err := os.ReadFile(parser_cfg_file)
 	if err != nil {
 		return fmt.Errorf("failed opening %s : %s", parser_cfg_file, err)
 	}
@@ -138,7 +138,7 @@ func testOneParser(pctx *UnixParserCtx, ectx EnricherCtx, dir string, b *testing
 	return nil
 }
 
-//prepTests is going to do the initialisation of parser : it's going to load enrichment plugins and load the patterns. This is done here so that we don't redo it for each test
+// prepTests is going to do the initialisation of parser : it's going to load enrichment plugins and load the patterns. This is done here so that we don't redo it for each test
 func prepTests() (*UnixParserCtx, EnricherCtx, error) {
 	var (
 		err  error
@@ -146,7 +146,7 @@ func prepTests() (*UnixParserCtx, EnricherCtx, error) {
 		ectx EnricherCtx
 	)
 
-	err = exprhelpers.Init()
+	err = exprhelpers.Init(nil)
 	if err != nil {
 		log.Fatalf("exprhelpers init failed: %s", err)
 	}
@@ -183,7 +183,7 @@ func loadTestFile(file string) []TestFile {
 		tf := TestFile{}
 		err := dec.Decode(&tf)
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			log.Fatalf("Failed to load testfile '%s' yaml error : %v", file, err)
@@ -196,7 +196,7 @@ func loadTestFile(file string) []TestFile {
 
 func matchEvent(expected types.Event, out types.Event, debug bool) ([]string, bool) {
 	var retInfo []string
-	var valid bool = false
+	var valid = false
 	expectMaps := []map[string]string{expected.Parsed, expected.Meta, expected.Enriched}
 	outMaps := []map[string]string{out.Parsed, out.Meta, out.Enriched}
 	outLabels := []string{"Parsed", "Meta", "Enriched"}
@@ -252,6 +252,7 @@ func matchEvent(expected types.Event, out types.Event, debug bool) ([]string, bo
 					if debug {
 						retInfo = append(retInfo, fmt.Sprintf("mismatch %s[%s] %s != %s", outLabels[mapIdx], expKey, expVal, outVal))
 					}
+					valid = false
 					goto checkFinished
 				}
 			} else { //missing entry
@@ -266,11 +267,11 @@ func matchEvent(expected types.Event, out types.Event, debug bool) ([]string, bo
 checkFinished:
 	if valid {
 		if debug {
-			retInfo = append(retInfo, fmt.Sprintf("OK ! %s", strings.Join(retInfo, "/")))
+			retInfo = append(retInfo, fmt.Sprintf("OK ! \n\t%s", strings.Join(retInfo, "\n\t")))
 		}
 	} else {
 		if debug {
-			retInfo = append(retInfo, fmt.Sprintf("KO ! %s", strings.Join(retInfo, "/")))
+			retInfo = append(retInfo, fmt.Sprintf("KO ! \n\t%s", strings.Join(retInfo, "\n\t")))
 		}
 	}
 	return retInfo, valid
@@ -295,7 +296,7 @@ func testSubSet(testSet TestFile, pctx UnixParserCtx, nodes []Node) (bool, error
 		only the keys of the expected part are checked against result
 	*/
 	if len(testSet.Results) == 0 && len(results) == 0 {
-		log.Fatalf("No results, no tests, abort.")
+		log.Fatal("No results, no tests, abort.")
 		return false, fmt.Errorf("no tests, no results")
 	}
 
@@ -334,7 +335,7 @@ reCheck:
 }
 
 func testFile(testSet []TestFile, pctx UnixParserCtx, nodes []Node) bool {
-	log.Warningf("Going to process one test set")
+	log.Warning("Going to process one test set")
 	for _, tf := range testSet {
 		//func testSubSet(testSet TestFile, pctx UnixParserCtx, nodes []Node) (bool, error) {
 		testOk, err := testSubSet(tf, pctx, nodes)
@@ -371,12 +372,12 @@ func TestGeneratePatternsDoc(t *testing.T) {
 	}
 	log.Infof("-> %s", spew.Sdump(pctx))
 	/*don't judge me, we do it for the users*/
-	p := make(PairList, len(pctx.Grok))
+	p := make(PairList, len(pctx.Grok.Patterns))
 
 	i := 0
-	for key, val := range pctx.Grok {
+	for key, val := range pctx.Grok.Patterns {
 		p[i] = Pair{key, val}
-		p[i].Value = strings.Replace(p[i].Value, "{%{", "\\{\\%\\{", -1)
+		p[i].Value = strings.ReplaceAll(p[i].Value, "{%{", "\\{\\%\\{")
 		i++
 	}
 	sort.Sort(p)

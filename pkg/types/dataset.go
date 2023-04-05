@@ -2,10 +2,11 @@ package types
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"path"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -14,6 +15,11 @@ type DataSource struct {
 	SourceURL string `yaml:"source_url"`
 	DestPath  string `yaml:"dest_file"`
 	Type      string `yaml:"type"`
+	//Control cache strategy on expensive regexps
+	Cache    *bool          `yaml:"cache"`
+	Strategy *string        `yaml:"strategy"`
+	Size     *int           `yaml:"size"`
+	TTL      *time.Duration `yaml:"ttl"`
 }
 
 type DataSet struct {
@@ -22,7 +28,7 @@ type DataSet struct {
 
 func downloadFile(url string, destPath string) error {
 	log.Debugf("downloading %s in %s", url, destPath)
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
@@ -33,12 +39,12 @@ func downloadFile(url string, destPath string) error {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download response 'HTTP %d' : %s", resp.StatusCode, string(body))
 	}
 

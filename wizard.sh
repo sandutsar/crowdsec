@@ -3,6 +3,10 @@
 set -o pipefail
 #set -x
 
+skip_tmp_acquis() {
+    [[ "${TMP_ACQUIS_FILE_SKIP}" == "skip" ]]
+}
+
 
 RED='\033[0;31m'
 BLUE='\033[0;34m'
@@ -24,6 +28,7 @@ CROWDSEC_CONFIG_PATH="${CROWDSEC_PATH}"
 CROWDSEC_LOG_FILE="/var/log/crowdsec.log"
 LAPI_LOG_FILE="/var/log/crowdsec_api.log"
 CROWDSEC_PLUGIN_DIR="${CROWDSEC_USR_DIR}/plugins"
+CROWDSEC_CONSOLE_DIR="${CROWDSEC_PATH}/console"
 
 CROWDSEC_BIN="./cmd/crowdsec/crowdsec"
 CSCLI_BIN="./cmd/crowdsec-cli/cscli"
@@ -43,7 +48,6 @@ else
 fi
 
 ACQUIS_PATH="${CROWDSEC_CONFIG_PATH}"
-TMP_ACQUIS_FILE="tmp-acquis.yaml"
 ACQUIS_TARGET="${ACQUIS_PATH}/acquis.yaml"
 
 SYSTEMD_PATH_FILE="/etc/systemd/system/crowdsec.service"
@@ -286,7 +290,7 @@ genyamllog() {
     echo "labels:"  >> ${TMP_ACQUIS_FILE}
     echo "  "${log_input_tags[${service}]}  >> ${TMP_ACQUIS_FILE}
     echo "---"  >> ${TMP_ACQUIS_FILE}
-    log_dbg "tmp acquisition file generated to: ${TMP_ACQUIS_FILE}"
+    log_dbg "${ACQUIS_FILE_MSG}"
 }
 
 genyamljournal() {
@@ -300,10 +304,18 @@ genyamljournal() {
     echo "labels:"  >> ${TMP_ACQUIS_FILE}
     echo "  "${log_input_tags[${service}]}  >> ${TMP_ACQUIS_FILE}
     echo "---"  >> ${TMP_ACQUIS_FILE}
-    log_dbg "tmp acquisition file generated to: ${TMP_ACQUIS_FILE}"
+    log_dbg "${ACQUIS_FILE_MSG}"
 }
 
 genacquisition() {
+    if skip_tmp_acquis; then 
+        TMP_ACQUIS_FILE="${ACQUIS_TARGET}"
+        ACQUIS_FILE_MSG="acquisition file generated to: ${TMP_ACQUIS_FILE}"
+    else
+        TMP_ACQUIS_FILE="tmp-acquis.yaml"
+        ACQUIS_FILE_MSG="tmp acquisition file generated to: ${TMP_ACQUIS_FILE}"
+    fi
+
     log_dbg "Found following services : "${DETECTED_SERVICES[@]}
     for PSVG in ${DETECTED_SERVICES[@]} ; do
         find_logs_for ${PSVG}
@@ -392,6 +404,7 @@ install_crowdsec() {
     mkdir -p "${CROWDSEC_CONFIG_PATH}/postoverflows" || exit
     mkdir -p "${CROWDSEC_CONFIG_PATH}/collections" || exit
     mkdir -p "${CROWDSEC_CONFIG_PATH}/patterns" || exit
+    mkdir -p "${CROWDSEC_CONSOLE_DIR}" || exit
 
     #tmp
     mkdir -p /tmp/data
@@ -408,6 +421,7 @@ install_crowdsec() {
     install -v -m 644 -D ./config/profiles.yaml "${CROWDSEC_CONFIG_PATH}" 1> /dev/null || exit
     install -v -m 644 -D ./config/simulation.yaml "${CROWDSEC_CONFIG_PATH}" 1> /dev/null || exit
     install -v -m 644 -D ./config/"${CONSOLE_FILE}" "${CROWDSEC_CONFIG_PATH}" 1> /dev/null || exit
+    install -v -m 644 -D ./config/context.yaml "${CROWDSEC_CONSOLE_DIR}" 1> /dev/null || exit
 
     DATA=${CROWDSEC_DATA_DIR} CFG=${CROWDSEC_CONFIG_PATH} envsubst '$CFG $DATA' < ./config/user.yaml > ${CROWDSEC_CONFIG_PATH}"/user.yaml" || log_fatal "unable to generate user configuration file"
     if [[ ${DOCKER_MODE} == "false" ]]; then
@@ -607,7 +621,9 @@ main() {
         ${CSCLI_BIN_INSTALLED} hub update
         install_collection
         genacquisition
-        mv "${TMP_ACQUIS_FILE}" "${ACQUIS_TARGET}"
+        if ! skip_tmp_acquis; then
+            mv "${TMP_ACQUIS_FILE}" "${ACQUIS_TARGET}"
+        fi
 
         return
     fi
@@ -666,7 +682,9 @@ main() {
 
         # Generate acquisition file and move it to the right folder
         genacquisition
-        mv "${TMP_ACQUIS_FILE}" "${ACQUIS_TARGET}"
+        if ! skip_tmp_acquis; then
+            mv "${TMP_ACQUIS_FILE}" "${ACQUIS_TARGET}"
+        fi
         log_info "acquisition file path: ${ACQUIS_TARGET}"
         # Install collections according to detected services
         log_dbg "Installing needed collections ..."
@@ -676,7 +694,6 @@ main() {
         log_dbg "Installing patterns"
         mkdir -p "${PATTERNS_PATH}"
         cp "./${PATTERNS_FOLDER}/"* "${PATTERNS_PATH}/"
-
 
         # api register
         ${CSCLI_BIN_INSTALLED} machines add --force "$(cat /etc/machine-id)" -a -f "${CROWDSEC_CONFIG_PATH}/${CLIENT_SECRETS}" || log_fatal "unable to add machine to the local API"
@@ -694,7 +711,9 @@ main() {
 
     if [[ "$1" == "detect" ]];
     then
-        rm -f "${TMP_ACQUIS_FILE}"
+        if ! skip_tmp_acquis; then
+            rm -f "${TMP_ACQUIS_FILE}"
+        fi
         detect_services
         if [[ ${DETECTED_SERVICES} == "" ]] ; then 
             log_err "No detected or selected services, stopping."
@@ -703,7 +722,9 @@ main() {
         log_info "Found ${#DETECTED_SERVICES[@]} supported services running:"
         genacquisition
         cat "${TMP_ACQUIS_FILE}"
-        rm "${TMP_ACQUIS_FILE}"
+        if ! skip_tmp_acquis; then
+            rm "${TMP_ACQUIS_FILE}"
+        fi
         return
     fi
 

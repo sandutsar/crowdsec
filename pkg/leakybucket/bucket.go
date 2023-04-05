@@ -6,26 +6,22 @@ import (
 	"sync/atomic"
 	"time"
 
-	//"log"
 	"github.com/crowdsecurity/crowdsec/pkg/time/rate"
 	"github.com/crowdsecurity/crowdsec/pkg/types"
-	"github.com/goombaio/namegenerator"
-	"gopkg.in/tomb.v2"
-
-	//rate "time/rate"
-
 	"github.com/davecgh/go-spew/spew"
+	"github.com/mohae/deepcopy"
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
-	//"golang.org/x/time/rate"
+	"gopkg.in/tomb.v2"
 )
 
-const (
-	LIVE = iota
-	TIMEMACHINE
-)
+// those constants are now defined in types/constants
+// const (
+// 	LIVE = iota
+// 	TIMEMACHINE
+// )
 
-//Leaky represents one instance of a bucket
+// Leaky represents one instance of a bucket
 type Leaky struct {
 	Name string
 	Mode int //LIVE or TIMEMACHINE
@@ -35,7 +31,7 @@ type Leaky struct {
 	//Queue is used to held the cache of objects in the bucket, it is used to know 'how many' objects we have in buffer.
 	Queue *Queue
 	//Leaky buckets are receiving message through a chan
-	In chan types.Event `json:"-"`
+	In chan *types.Event `json:"-"`
 	//Leaky buckets are pushing their overflows through a chan
 	Out chan *Queue `json:"-"`
 	// shared for all buckets (the idea is to kill this afterwards)
@@ -61,16 +57,17 @@ type Leaky struct {
 	Duration     time.Duration
 	Pour         func(*Leaky, types.Event) `json:"-"`
 	//Profiling when set to true enables profiling of bucket
-	Profiling       bool
-	timedOverflow   bool
-	logger          *log.Entry
-	scopeType       types.ScopeType
-	hash            string
-	scenarioVersion string
-	tomb            *tomb.Tomb
-	wgPour          *sync.WaitGroup
-	wgDumpState     *sync.WaitGroup
-	mutex           *sync.Mutex //used only for TIMEMACHINE mode to allow garbage collection without races
+	Profiling           bool
+	timedOverflow       bool
+	conditionalOverflow bool
+	logger              *log.Entry
+	scopeType           types.ScopeType
+	hash                string
+	scenarioVersion     string
+	tomb                *tomb.Tomb
+	wgPour              *sync.WaitGroup
+	wgDumpState         *sync.WaitGroup
+	mutex               *sync.Mutex //used only for TIMEMACHINE mode to allow garbage collection without races
 }
 
 var BucketsPour = prometheus.NewCounterVec(
@@ -105,10 +102,10 @@ var BucketsUnderflow = prometheus.NewCounterVec(
 	[]string{"name"},
 )
 
-var BucketsInstanciation = prometheus.NewCounterVec(
+var BucketsInstantiation = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "cs_bucket_created_total",
-		Help: "Total buckets were instanciated.",
+		Help: "Total buckets were instantiated.",
 	},
 	[]string{"name"},
 )
@@ -152,13 +149,13 @@ func FromFactory(bucketFactory BucketFactory) *Leaky {
 	} else {
 		limiter = rate.NewLimiter(rate.Every(bucketFactory.leakspeed), bucketFactory.Capacity)
 	}
-	BucketsInstanciation.With(prometheus.Labels{"name": bucketFactory.Name}).Inc()
+	BucketsInstantiation.With(prometheus.Labels{"name": bucketFactory.Name}).Inc()
 
 	//create the leaky bucket per se
 	l := &Leaky{
 		Name:            bucketFactory.Name,
 		Limiter:         limiter,
-		Uuid:            namegenerator.NewNameGenerator(time.Now().UTC().UnixNano()).Generate(),
+		Uuid:            seed.Generate(),
 		Queue:           NewQueue(Qsize),
 		CacheSize:       bucketFactory.CacheSize,
 		Out:             make(chan *Queue, 1),
@@ -170,7 +167,7 @@ func FromFactory(bucketFactory BucketFactory) *Leaky {
 		Pour:            Pour,
 		Reprocess:       bucketFactory.Reprocess,
 		Profiling:       bucketFactory.Profiling,
-		Mode:            LIVE,
+		Mode:            types.LIVE,
 		scopeType:       bucketFactory.ScopeType,
 		scenarioVersion: bucketFactory.ScenarioVersion,
 		hash:            bucketFactory.hash,
@@ -188,6 +185,10 @@ func FromFactory(bucketFactory BucketFactory) *Leaky {
 		l.timedOverflow = true
 	}
 
+	if l.BucketConfig.Type == "conditional" {
+		l.conditionalOverflow = true
+		l.Duration = l.BucketConfig.leakspeed
+	}
 	return l
 }
 
@@ -196,7 +197,9 @@ func FromFactory(bucketFactory BucketFactory) *Leaky {
 func LeakRoutine(leaky *Leaky) error {
 
 	var (
-		durationTicker <-chan time.Time = make(<-chan time.Time)
+		durationTickerChan = make(<-chan time.Time)
+		durationTicker     *time.Ticker
+		firstEvent         = true
 	)
 
 	defer types.CatchPanic(fmt.Sprintf("crowdsec/LeakRoutine/%s", leaky.Name))
@@ -207,11 +210,17 @@ func LeakRoutine(leaky *Leaky) error {
 	/*todo : we create a logger at runtime while we want leakroutine to be up asap, might not be a good idea*/
 	leaky.logger = leaky.BucketConfig.logger.WithFields(log.Fields{"capacity": leaky.Capacity, "partition": leaky.Mapkey, "bucket_id": leaky.Uuid})
 
+	//We copy the processors, as they are coming from the BucketFactory, and thus are shared between buckets
+	//If we don't copy, processors using local cache (such as Uniq) are subject to race conditions
+	//This can lead to creating buckets that will discard their first events, preventing the underflow ticker from being initialized
+	//and preventing them from being destroyed
+	processors := deepcopy.Copy(leaky.BucketConfig.processors).([]Processor)
+
 	leaky.Signal <- true
 	atomic.AddInt64(&LeakyRoutineCount, 1)
 	defer atomic.AddInt64(&LeakyRoutineCount, -1)
 
-	for _, f := range leaky.BucketConfig.processors {
+	for _, f := range processors {
 		err := f.OnBucketInit(leaky.BucketConfig)
 		if err != nil {
 			leaky.logger.Errorf("Problem at bucket initializiation. Bail out %T : %v", f, err)
@@ -226,8 +235,8 @@ func LeakRoutine(leaky *Leaky) error {
 		/*receiving an event*/
 		case msg := <-leaky.In:
 			/*the msg var use is confusing and is redeclared in a different type :/*/
-			for _, processor := range leaky.BucketConfig.processors {
-				msg := processor.OnBucketPour(leaky.BucketConfig)(msg, leaky)
+			for _, processor := range processors {
+				msg = processor.OnBucketPour(leaky.BucketConfig)(*msg, leaky)
 				// if &msg == nil we stop processing
 				if msg == nil {
 					goto End
@@ -238,11 +247,30 @@ func LeakRoutine(leaky *Leaky) error {
 			}
 			BucketsPour.With(prometheus.Labels{"name": leaky.Name, "source": msg.Line.Src, "type": msg.Line.Module}).Inc()
 
-			leaky.Pour(leaky, msg) // glue for now
+			leaky.Pour(leaky, *msg) // glue for now
+
+			for _, processor := range processors {
+				msg = processor.AfterBucketPour(leaky.BucketConfig)(*msg, leaky)
+				if msg == nil {
+					goto End
+				}
+			}
+
 			//Clear cache on behalf of pour
-			tmp := time.NewTicker(leaky.Duration)
-			durationTicker = tmp.C
-			defer tmp.Stop()
+
+			// if durationTicker isn't initialized, then we're pouring our first event
+
+			// reinitialize the durationTicker when it's not a counter bucket
+			if !leaky.timedOverflow || firstEvent {
+				if firstEvent {
+					durationTicker = time.NewTicker(leaky.Duration)
+					durationTickerChan = durationTicker.C
+					defer durationTicker.Stop()
+				} else {
+					durationTicker.Reset(leaky.Duration)
+				}
+			}
+			firstEvent = false
 		/*we overflowed*/
 		case ofw := <-leaky.Out:
 			leaky.overflow(ofw)
@@ -256,7 +284,7 @@ func LeakRoutine(leaky *Leaky) error {
 			leaky.logger.Tracef("Returning from leaky routine.")
 			return nil
 		/*we underflow or reach bucket deadline (timers)*/
-		case <-durationTicker:
+		case <-durationTickerChan:
 			var (
 				alert types.RuntimeAlert
 				err   error
@@ -318,7 +346,8 @@ func Pour(leaky *Leaky, msg types.Event) {
 		leaky.First_ts = time.Now().UTC()
 	}
 	leaky.Last_ts = time.Now().UTC()
-	if leaky.Limiter.Allow() {
+
+	if leaky.Limiter.Allow() || leaky.conditionalOverflow {
 		leaky.Queue.Add(msg)
 	} else {
 		leaky.Ovflw_ts = time.Now().UTC()
@@ -343,7 +372,7 @@ func (leaky *Leaky) overflow(ofw *Queue) {
 		}
 	}
 	if leaky.logger.Level >= log.TraceLevel {
-		leaky.logger.Tracef("Overflow event: %s", spew.Sdump(types.RuntimeAlert(alert)))
+		leaky.logger.Tracef("Overflow event: %s", spew.Sdump(alert))
 	}
 	mt, _ := leaky.Ovflw_ts.MarshalText()
 	leaky.logger.Tracef("overflow time : %s", mt)

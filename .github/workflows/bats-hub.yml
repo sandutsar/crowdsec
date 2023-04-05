@@ -8,11 +8,18 @@ on:
       GIST_BADGES_ID:
         required: true
 
+env:
+  PREFIX_TEST_NAMES_WITH_FILE: true
+
 jobs:
   build:
+    strategy:
+      matrix:
+        go-version: ["1.20.1"]
+
     name: "Build + tests"
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
 
     - name: "Force machineid"
@@ -20,23 +27,37 @@ jobs:
           sudo chmod +w /etc/machine-id
           echo githubciXXXXXXXXXXXXXXXXXXXXXXXX | sudo tee /etc/machine-id
 
-    - name: "Set up Go 1.17"
+    - name: "Set up Go ${{ matrix.go-version }}"
       uses: actions/setup-go@v3
       with:
-        go-version: 1.17
-      id: go
+        go-version: ${{ matrix.go-version }}
 
-    - name: "Clone CrowdSec"
+    - name: "Check out CrowdSec repository"
       uses: actions/checkout@v3
       with:
         fetch-depth: 0
         submodules: true
 
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          %LocalAppData%\go-build
+        key: ${{ runner.os }}-${{ matrix.go-version }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ matrix.go-version }}-go-
+
     - name: "Install bats dependencies"
+      env:
+        GOBIN: /usr/local/bin
       run: |
-        sudo apt install -y -qq build-essential daemonize jq netcat-openbsd
-        GO111MODULE=on go get github.com/mikefarah/yq/v4
-        sudo cp -u ~/go/bin/yq /usr/local/bin/
+        sudo apt -qq -y -o=Dpkg::Use-Pty=0 install build-essential daemonize jq netcat-openbsd
+        go install github.com/mikefarah/yq/v4@latest
+        go install github.com/cloudflare/cfssl/cmd/cfssl@master
+        go install github.com/cloudflare/cfssl/cmd/cfssljson@master
 
     - name: "Build crowdsec and fixture"
       run: make bats-clean bats-build bats-fixture
@@ -45,11 +66,11 @@ jobs:
       run: make bats-test-hub
 
     - name: "Collect hub coverage"
-      run: ./tests/collect-hub-coverage >> $GITHUB_ENV
+      run: ./test/bin/collect-hub-coverage >> $GITHUB_ENV
 
     - name: "Create Parsers badge"
-      uses: schneegans/dynamic-badges-action@v1.1.0
-      if: ${{ github.ref == 'refs/heads/master' }}
+      uses: schneegans/dynamic-badges-action@v1.6.0
+      if: ${{ github.ref == 'refs/heads/master' && github.repository_owner == 'crowdsecurity' }}
       with:
         auth: ${{ secrets.GIST_BADGES_SECRET }}
         gistID: ${{ secrets.GIST_BADGES_ID }}
@@ -59,8 +80,8 @@ jobs:
         color: ${{ env.SCENARIO_BADGE_COLOR }}
 
     - name: "Create Scenarios badge"
-      uses: schneegans/dynamic-badges-action@v1.1.0
-      if: ${{ github.ref == 'refs/heads/master' }}
+      uses: schneegans/dynamic-badges-action@v1.6.0
+      if: ${{ github.ref == 'refs/heads/master' && github.repository_owner == 'crowdsecurity' }}
       with:
         auth: ${{ secrets.GIST_BADGES_SECRET }}
         gistID: ${{ secrets.GIST_BADGES_ID }}

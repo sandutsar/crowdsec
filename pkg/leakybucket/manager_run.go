@@ -3,7 +3,6 @@ package leakybucket
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"os"
 	"time"
@@ -14,7 +13,6 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/antonmedv/expr"
-	"github.com/crowdsecurity/crowdsec/pkg/exprhelpers"
 	"github.com/crowdsecurity/crowdsec/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -23,9 +21,11 @@ var serialized map[string]Leaky
 var BucketPourCache map[string][]types.Event
 var BucketPourTrack bool
 
-/*The leaky routines lifecycle are based on "real" time.
+/*
+The leaky routines lifecycle are based on "real" time.
 But when we are running in time-machine mode, the reference time is in logs and not "real" time.
-Thus we need to garbage collect them to avoid a skyrocketing memory usage.*/
+Thus we need to garbage collect them to avoid a skyrocketing memory usage.
+*/
 func GarbageCollectBuckets(deadline time.Time, buckets *Buckets) error {
 	buckets.wgPour.Wait()
 	buckets.wgDumpState.Add(1)
@@ -87,7 +87,7 @@ func DumpBucketsStateAt(deadline time.Time, outputdir string, buckets *Buckets) 
 	if outputdir == "" {
 		return "", fmt.Errorf("empty output dir for dump bucket state")
 	}
-	tmpFd, err := ioutil.TempFile(os.TempDir(), "crowdsec-buckets-dump-")
+	tmpFd, err := os.CreateTemp(os.TempDir(), "crowdsec-buckets-dump-")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file : %s", err)
 	}
@@ -132,7 +132,7 @@ func DumpBucketsStateAt(deadline time.Time, outputdir string, buckets *Buckets) 
 	})
 	bbuckets, err := json.MarshalIndent(serialized, "", " ")
 	if err != nil {
-		log.Fatalf("Failed to unmarshal buckets : %s", err)
+		return "", fmt.Errorf("Failed to unmarshal buckets : %s", err)
 	}
 	size, err := tmpFd.Write(bbuckets)
 	if err != nil {
@@ -154,7 +154,7 @@ func ShutdownAllBuckets(buckets *Buckets) error {
 	return nil
 }
 
-func PourItemToBucket(bucket *Leaky, holder BucketFactory, buckets *Buckets, parsed types.Event) (bool, error) {
+func PourItemToBucket(bucket *Leaky, holder BucketFactory, buckets *Buckets, parsed *types.Event) (bool, error) {
 	var sent bool
 	var buckey = bucket.Mapkey
 	var err error
@@ -186,14 +186,14 @@ func PourItemToBucket(bucket *Leaky, holder BucketFactory, buckets *Buckets, par
 				}
 				continue
 			}
-			holder.logger.Tracef("Signal exists, try to pour :)")
+			//holder.logger.Tracef("Signal exists, try to pour :)")
 		default:
 			/*nothing to read, but not closed, try to pour */
-			holder.logger.Tracef("Signal exists but empty, try to pour :)")
+			//holder.logger.Tracef("Signal exists but empty, try to pour :)")
 		}
 
 		/*let's see if this time-bucket should have expired */
-		if bucket.Mode == TIMEMACHINE {
+		if bucket.Mode == types.TIMEMACHINE {
 			bucket.mutex.Lock()
 			firstTs := bucket.First_ts
 			lastTs := bucket.Last_ts
@@ -221,19 +221,19 @@ func PourItemToBucket(bucket *Leaky, holder BucketFactory, buckets *Buckets, par
 		/*the bucket seems to be up & running*/
 		select {
 		case bucket.In <- parsed:
-			holder.logger.Tracef("Successfully sent !")
+			//holder.logger.Tracef("Successfully sent !")
 			if BucketPourTrack {
 				if _, ok := BucketPourCache[bucket.Name]; !ok {
 					BucketPourCache[bucket.Name] = make([]types.Event, 0)
 				}
-				evt := deepcopy.Copy(parsed)
+				evt := deepcopy.Copy(*parsed)
 				BucketPourCache[bucket.Name] = append(BucketPourCache[bucket.Name], evt.(types.Event))
 			}
 			sent = true
 			continue
 		default:
 			failed_sent += 1
-			holder.logger.Tracef("Failed to send, try again")
+			//holder.logger.Tracef("Failed to send, try again")
 			continue
 
 		}
@@ -251,16 +251,16 @@ func LoadOrStoreBucketFromHolder(partitionKey string, buckets *Buckets, holder B
 		var fresh_bucket *Leaky
 
 		switch expectMode {
-		case TIMEMACHINE:
+		case types.TIMEMACHINE:
 			fresh_bucket = NewTimeMachine(holder)
 			holder.logger.Debugf("Creating TimeMachine bucket")
-		case LIVE:
+		case types.LIVE:
 			fresh_bucket = NewLeaky(holder)
 			holder.logger.Debugf("Creating Live bucket")
 		default:
 			return nil, fmt.Errorf("input event has no expected mode : %+v", expectMode)
 		}
-		fresh_bucket.In = make(chan types.Event)
+		fresh_bucket.In = make(chan *types.Event)
 		fresh_bucket.Mapkey = partitionKey
 		fresh_bucket.Signal = make(chan bool, 1)
 		actual, stored := buckets.Bucket_map.LoadOrStore(partitionKey, fresh_bucket)
@@ -289,64 +289,63 @@ func PourItemToHolders(parsed types.Event, holders []BucketFactory, buckets *Buc
 		if BucketPourCache == nil {
 			BucketPourCache = make(map[string][]types.Event)
 		}
-		if _, ok := BucketPourCache["OK"]; !ok {
+		if _, ok = BucketPourCache["OK"]; !ok {
 			BucketPourCache["OK"] = make([]types.Event, 0)
 		}
 		evt := deepcopy.Copy(parsed)
 		BucketPourCache["OK"] = append(BucketPourCache["OK"], evt.(types.Event))
 	}
 
-	cachedExprEnv := exprhelpers.GetExprEnv(map[string]interface{}{"evt": &parsed})
-
 	//find the relevant holders (scenarios)
-	for idx, holder := range holders {
+	for idx := 0; idx < len(holders); idx++ {
+		//for idx, holder := range holders {
 
 		//evaluate bucket's condition
-		if holder.RunTimeFilter != nil {
-			holder.logger.Tracef("event against holder %d/%d", idx, len(holders))
-			output, err := expr.Run(holder.RunTimeFilter, cachedExprEnv)
+		if holders[idx].RunTimeFilter != nil {
+			holders[idx].logger.Tracef("event against holder %d/%d", idx, len(holders))
+			output, err := expr.Run(holders[idx].RunTimeFilter, map[string]interface{}{"evt": &parsed})
 			if err != nil {
-				holder.logger.Errorf("failed parsing : %v", err)
+				holders[idx].logger.Errorf("failed parsing : %v", err)
 				return false, fmt.Errorf("leaky failed : %s", err)
 			}
 			// we assume we a bool should add type check here
 			if condition, ok = output.(bool); !ok {
-				holder.logger.Errorf("unexpected non-bool return : %T", output)
-				holder.logger.Fatalf("Filter issue")
+				holders[idx].logger.Errorf("unexpected non-bool return : %T", output)
+				holders[idx].logger.Fatalf("Filter issue")
 			}
 
-			if holder.Debug {
-				holder.ExprDebugger.Run(holder.logger, condition, cachedExprEnv)
+			if holders[idx].Debug {
+				holders[idx].ExprDebugger.Run(holders[idx].logger, condition, map[string]interface{}{"evt": &parsed})
 			}
 			if !condition {
-				holder.logger.Debugf("Event leaving node : ko (filter mismatch)")
+				holders[idx].logger.Debugf("Event leaving node : ko (filter mismatch)")
 				continue
 			}
 		}
 
 		//groupby determines the partition key for the specific bucket
 		var groupby string
-		if holder.RunTimeGroupBy != nil {
-			tmpGroupBy, err := expr.Run(holder.RunTimeGroupBy, cachedExprEnv)
+		if holders[idx].RunTimeGroupBy != nil {
+			tmpGroupBy, err := expr.Run(holders[idx].RunTimeGroupBy, map[string]interface{}{"evt": &parsed})
 			if err != nil {
-				holder.logger.Errorf("failed groupby : %v", err)
+				holders[idx].logger.Errorf("failed groupby : %v", err)
 				return false, errors.New("leaky failed :/")
 			}
 
 			if groupby, ok = tmpGroupBy.(string); !ok {
-				holder.logger.Fatalf("failed groupby type : %v", err)
+				holders[idx].logger.Fatalf("failed groupby type : %v", err)
 				return false, errors.New("groupby wrong type")
 			}
 		}
-		buckey := GetKey(holder, groupby)
+		buckey := GetKey(holders[idx], groupby)
 
 		//we need to either find the existing bucket, or create a new one (if it's the first event to hit it for this partition key)
-		bucket, err := LoadOrStoreBucketFromHolder(buckey, buckets, holder, parsed.ExpectMode)
+		bucket, err := LoadOrStoreBucketFromHolder(buckey, buckets, holders[idx], parsed.ExpectMode)
 		if err != nil {
 			return false, errors.Wrap(err, "failed to load or store bucket")
 		}
 		//finally, pour the even into the bucket
-		ok, err := PourItemToBucket(bucket, holder, buckets, parsed)
+		ok, err := PourItemToBucket(bucket, holders[idx], buckets, &parsed)
 		if err != nil {
 			return false, errors.Wrap(err, "failed to pour bucket")
 		}

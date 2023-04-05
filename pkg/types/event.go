@@ -14,11 +14,11 @@ const (
 	OVFLW
 )
 
-//Event is the structure representing a runtime event (log or overflow)
+// Event is the structure representing a runtime event (log or overflow)
 type Event struct {
 	/* is it a log or an overflow */
 	Type            int    `yaml:"Type,omitempty" json:"Type,omitempty"`             //Can be types.LOG (0) or types.OVFLOW (1)
-	ExpectMode      int    `yaml:"ExpectMode,omitempty" json:"ExpectMode,omitempty"` //how to buckets should handle event : leaky.TIMEMACHINE or leaky.LIVE
+	ExpectMode      int    `yaml:"ExpectMode,omitempty" json:"ExpectMode,omitempty"` //how to buckets should handle event : types.TIMEMACHINE or types.LIVE
 	Whitelisted     bool   `yaml:"Whitelisted,omitempty" json:"Whitelisted,omitempty"`
 	WhitelistReason string `yaml:"WhitelistReason,omitempty" json:"whitelist_reason,omitempty"`
 	//should add whitelist reason ?
@@ -30,10 +30,13 @@ type Event struct {
 	Parsed map[string]string `yaml:"Parsed,omitempty" json:"Parsed,omitempty"`
 	/* output of enrichment */
 	Enriched map[string]string `yaml:"Enriched,omitempty" json:"Enriched,omitempty"`
+	/* output of Unmarshal */
+	Unmarshaled map[string]interface{} `yaml:"Unmarshaled,omitempty" json:"Unmarshaled,omitempty"`
 	/* Overflow */
 	Overflow      RuntimeAlert `yaml:"Overflow,omitempty" json:"Alert,omitempty"`
 	Time          time.Time    `yaml:"Time,omitempty" json:"Time,omitempty"` //parsed time `json:"-"` ``
 	StrTime       string       `yaml:"StrTime,omitempty" json:"StrTime,omitempty"`
+	StrTimeFormat string       `yaml:"StrTimeFormat,omitempty" json:"StrTimeFormat,omitempty"`
 	MarshaledTime string       `yaml:"MarshaledTime,omitempty" json:"MarshaledTime,omitempty"`
 	Process       bool         `yaml:"Process,omitempty" json:"Process,omitempty"` //can be set to false to avoid processing line
 	/* Meta is the only part that will make it to the API - it should be normalized */
@@ -51,7 +54,26 @@ func (e *Event) GetType() string {
 	}
 }
 
-//Move in leakybuckets
+func (e *Event) GetMeta(key string) string {
+	if e.Type == OVFLW {
+		for _, alert := range e.Overflow.APIAlerts {
+			for _, event := range alert.Events {
+				if event.GetMeta(key) != "" {
+					return event.GetMeta(key)
+				}
+			}
+		}
+	} else if e.Type == LOG {
+		for k, v := range e.Meta {
+			if k == key {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// Move in leakybuckets
 const (
 	Undefined = ""
 	Ip        = "Ip"
@@ -61,7 +83,7 @@ const (
 	AS        = "AS"
 )
 
-//Move in leakybuckets
+// Move in leakybuckets
 type ScopeType struct {
 	Scope         string `yaml:"type"`
 	Filter        string `yaml:"expression"`

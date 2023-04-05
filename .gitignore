@@ -6,13 +6,18 @@
 *.dylib
 *~
 .pc
+.vscode
 
 # Test binaries, built with `go test -c`
 *.test
 *.cover
 
-# Output of the go coverage tool, specifically when used with LiteIDE
+# Test binaries, built from *_test.go
+pkg/csplugin/tests/cs_plugin_test*
+
+# Output of go-acc, go -cover
 *.out
+test/coverage/*
 
 # Development artifacts, backups, etc
 *.swp
@@ -30,13 +35,18 @@ plugins/notifications/splunk/notification-splunk
 plugins/notifications/email/notification-email
 plugins/notifications/dummy/notification-dummy
 
-#test binaries
-pkg/csplugin/tests/cs_plugin_test*
+# Test cache (downloaded files)
+.cache
 
-#release stuff
+# Release stuff
 crowdsec-v*
 pkg/cwhub/hubdir/.index.json
 msi
 *.msi
-*.nukpg
+**/*.nupkg
 *.tgz
+
+# Python
+__pycache__
+*.py[cod]
+*.egg-info

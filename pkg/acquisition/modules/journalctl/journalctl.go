@@ -9,15 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crowdsecurity/crowdsec/pkg/acquisition/configuration"
-	leaky "github.com/crowdsecurity/crowdsec/pkg/leakybucket"
-	"github.com/crowdsecurity/crowdsec/pkg/types"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
-
 	"gopkg.in/tomb.v2"
 	"gopkg.in/yaml.v2"
+
+	"github.com/crowdsecurity/crowdsec/pkg/acquisition/configuration"
+	"github.com/crowdsecurity/crowdsec/pkg/types"
 )
 
 type JournalCtlConfiguration struct {
@@ -54,7 +53,8 @@ func readLine(scanner *bufio.Scanner, out chan string, errChan chan error) error
 	if errChan != nil && scanner.Err() != nil {
 		errChan <- scanner.Err()
 		close(errChan)
-		return nil //error is already consumed by runJournalCtl
+		// the error is already consumed by runJournalCtl
+		return nil //nolint:nilerr
 	}
 	if errChan != nil {
 		close(errChan)
@@ -133,9 +133,9 @@ func (j *JournalCtlSource) runJournalCtl(out chan types.Event, t *tomb.Tomb) err
 			linesRead.With(prometheus.Labels{"source": j.src}).Inc()
 			var evt types.Event
 			if !j.config.UseTimeMachine {
-				evt = types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.LIVE}
+				evt = types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: types.LIVE}
 			} else {
-				evt = types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.TIMEMACHINE}
+				evt = types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: types.TIMEMACHINE}
 			}
 			out <- evt
 		case stderrLine := <-stderrChan:
@@ -154,6 +154,10 @@ func (j *JournalCtlSource) runJournalCtl(out chan types.Event, t *tomb.Tomb) err
 	}
 }
 
+func (j *JournalCtlSource) GetUuid() string {
+	return j.config.UniqueId
+}
+
 func (j *JournalCtlSource) GetMetrics() []prometheus.Collector {
 	return []prometheus.Collector{linesRead}
 }
@@ -162,36 +166,50 @@ func (j *JournalCtlSource) GetAggregMetrics() []prometheus.Collector {
 	return []prometheus.Collector{linesRead}
 }
 
-func (j *JournalCtlSource) Configure(yamlConfig []byte, logger *log.Entry) error {
-	config := JournalCtlConfiguration{}
-	j.logger = logger
-	err := yaml.UnmarshalStrict(yamlConfig, &config)
+func (j *JournalCtlSource) UnmarshalConfig(yamlConfig []byte) error {
+	j.config = JournalCtlConfiguration{}
+	err := yaml.UnmarshalStrict(yamlConfig, &j.config)
 	if err != nil {
-		return errors.Wrap(err, "Cannot parse JournalCtlSource configuration")
+		return fmt.Errorf("cannot parse JournalCtlSource configuration: %w", err)
 	}
-	if config.Mode == "" {
-		config.Mode = configuration.TAIL_MODE
+
+	if j.config.Mode == "" {
+		j.config.Mode = configuration.TAIL_MODE
 	}
+
 	var args []string
-	if config.Mode == configuration.TAIL_MODE {
+	if j.config.Mode == configuration.TAIL_MODE {
 		args = journalctlArgstreaming
 	} else {
 		args = journalctlArgsOneShot
 	}
-	if len(config.Filters) == 0 {
+
+	if len(j.config.Filters) == 0 {
 		return fmt.Errorf("journalctl_filter is required")
 	}
-	j.args = append(args, config.Filters...)
-	j.src = fmt.Sprintf("journalctl-%s", strings.Join(config.Filters, "."))
-	j.config = config
+	j.args = append(args, j.config.Filters...)
+	j.src = fmt.Sprintf("journalctl-%s", strings.Join(j.config.Filters, "."))
+
 	return nil
 }
 
-func (j *JournalCtlSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry) error {
+func (j *JournalCtlSource) Configure(yamlConfig []byte, logger *log.Entry) error {
+	j.logger = logger
+
+	err := j.UnmarshalConfig(yamlConfig)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (j *JournalCtlSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry, uuid string) error {
 	j.logger = logger
 	j.config = JournalCtlConfiguration{}
 	j.config.Mode = configuration.CAT_MODE
 	j.config.Labels = labels
+	j.config.UniqueId = uuid
 
 	//format for the DSN is : journalctl://filters=FILTER1&filters=FILTER2
 	if !strings.HasPrefix(dsn, "journalctl://") {

@@ -8,8 +8,8 @@ import (
 )
 
 func TestXMLGetAttributeValue(t *testing.T) {
-	if err := Init(); err != nil {
-		log.Fatalf(err.Error())
+	if err := Init(nil); err != nil {
+		log.Fatal(err)
 	}
 
 	tests := []struct {
@@ -57,7 +57,7 @@ func TestXMLGetAttributeValue(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		result := XMLGetAttributeValue(test.xmlString, test.path, test.attribute)
+		result, _ := XMLGetAttributeValue(test.xmlString, test.path, test.attribute)
 		isOk := assert.Equal(t, test.expectResult, result)
 		if !isOk {
 			t.Fatalf("test '%s' failed", test.name)
@@ -67,8 +67,8 @@ func TestXMLGetAttributeValue(t *testing.T) {
 
 }
 func TestXMLGetNodeValue(t *testing.T) {
-	if err := Init(); err != nil {
-		log.Fatalf(err.Error())
+	if err := Init(nil); err != nil {
+		log.Fatal(err)
 	}
 
 	tests := []struct {
@@ -104,7 +104,7 @@ func TestXMLGetNodeValue(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		result := XMLGetNodeValue(test.xmlString, test.path)
+		result, _ := XMLGetNodeValue(test.xmlString, test.path)
 		isOk := assert.Equal(t, test.expectResult, result)
 		if !isOk {
 			t.Fatalf("test '%s' failed", test.name)

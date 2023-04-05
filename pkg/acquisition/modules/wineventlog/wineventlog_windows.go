@@ -9,9 +9,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/crowdsecurity/crowdsec/pkg/acquisition/configuration"
-	leaky "github.com/crowdsecurity/crowdsec/pkg/leakybucket"
-	"github.com/crowdsecurity/crowdsec/pkg/types"
 	"github.com/google/winops/winlog"
 	"github.com/google/winops/winlog/wevtapi"
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,6 +16,9 @@ import (
 	"golang.org/x/sys/windows"
 	"gopkg.in/tomb.v2"
 	"gopkg.in/yaml.v2"
+
+	"github.com/crowdsecurity/crowdsec/pkg/acquisition/configuration"
+	"github.com/crowdsecurity/crowdsec/pkg/types"
 )
 
 type WinEventLogConfiguration struct {
@@ -72,7 +72,7 @@ func logLevelToInt(logLevel string) ([]string, error) {
 	}
 }
 
-//This is lifted from winops/winlog, but we only want to render the basic XML string, we don't need the extra fluff
+// This is lifted from winops/winlog, but we only want to render the basic XML string, we don't need the extra fluff
 func (w *WinEventLogSource) getXMLEvents(config *winlog.SubscribeConfig, publisherCache map[string]windows.Handle, resultSet windows.Handle, maxEvents int) ([]string, error) {
 	var events = make([]windows.Handle, maxEvents)
 	var returned uint32
@@ -195,9 +195,9 @@ func (w *WinEventLogSource) getEvents(out chan types.Event, t *tomb.Tomb) error 
 					l.Src = w.name
 					l.Process = true
 					if !w.config.UseTimeMachine {
-						out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.LIVE}
+						out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: types.LIVE}
 					} else {
-						out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: leaky.TIMEMACHINE}
+						out <- types.Event{Line: l, Process: true, Type: types.LOG, ExpectMode: types.TIMEMACHINE}
 					}
 				}
 			}
@@ -228,29 +228,30 @@ func (w *WinEventLogSource) generateConfig(query string) (*winlog.SubscribeConfi
 	return &config, nil
 }
 
-func (w *WinEventLogSource) Configure(yamlConfig []byte, logger *log.Entry) error {
+func (w *WinEventLogSource) GetUuid() string {
+	return w.config.UniqueId
+}
 
-	config := WinEventLogConfiguration{}
-	w.logger = logger
-	err := yaml.UnmarshalStrict(yamlConfig, &config)
+func (w *WinEventLogSource) UnmarshalConfig(yamlConfig []byte) error {
+	w.config = WinEventLogConfiguration{}
 
+	err := yaml.UnmarshalStrict(yamlConfig, &w.config)
 	if err != nil {
 		return fmt.Errorf("unable to parse configuration: %v", err)
 	}
 
-	if config.EventChannel != "" && config.XPathQuery != "" {
+	if w.config.EventChannel != "" && w.config.XPathQuery != "" {
 		return fmt.Errorf("event_channel and xpath_query are mutually exclusive")
 	}
 
-	if config.EventChannel == "" && config.XPathQuery == "" {
+	if w.config.EventChannel == "" && w.config.XPathQuery == "" {
 		return fmt.Errorf("event_channel or xpath_query must be set")
 	}
 
-	config.Mode = configuration.TAIL_MODE
-	w.config = config
+	w.config.Mode = configuration.TAIL_MODE
 
-	if config.XPathQuery != "" {
-		w.query = config.XPathQuery
+	if w.config.XPathQuery != "" {
+		w.query = w.config.XPathQuery
 	} else {
 		w.query, err = w.buildXpathQuery()
 		if err != nil {
@@ -258,13 +259,8 @@ func (w *WinEventLogSource) Configure(yamlConfig []byte, logger *log.Entry) erro
 		}
 	}
 
-	w.evtConfig, err = w.generateConfig(w.query)
-	if err != nil {
-		return err
-	}
-
-	if config.PrettyName != "" {
-		w.name = config.PrettyName
+	if w.config.PrettyName != "" {
+		w.name = w.config.PrettyName
 	} else {
 		w.name = w.query
 	}
@@ -272,7 +268,23 @@ func (w *WinEventLogSource) Configure(yamlConfig []byte, logger *log.Entry) erro
 	return nil
 }
 
-func (w *WinEventLogSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry) error {
+func (w *WinEventLogSource) Configure(yamlConfig []byte, logger *log.Entry) error {
+	w.logger = logger
+
+	err := w.UnmarshalConfig(yamlConfig)
+	if err != nil {
+		return err
+	}
+
+	w.evtConfig, err = w.generateConfig(w.query)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (w *WinEventLogSource) ConfigureByDSN(dsn string, labels map[string]string, logger *log.Entry, uuid string) error {
 	return nil
 }
 

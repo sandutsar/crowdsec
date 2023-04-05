@@ -139,7 +139,7 @@ func StopContainer(name string) error {
 		return fmt.Errorf("failed to create docker client : %s", err)
 	}
 	ctx := context.Background()
-	var to time.Duration = 20 * time.Second
+	to := 20 * time.Second
 	if err := cli.ContainerStop(ctx, name, &to); err != nil {
 		return fmt.Errorf("failed while stopping %s : %s", name, err)
 	}
@@ -155,7 +155,7 @@ func RemoveContainer(name string) error {
 	ctx := context.Background()
 	log.Printf("Removing docker metabase %s", name)
 	if err := cli.ContainerRemove(ctx, name, types.ContainerRemoveOptions{}); err != nil {
-		return fmt.Errorf("failed remove container %s : %s", name, err)
+		return fmt.Errorf("failed to remove container %s : %s", name, err)
 	}
 	return nil
 }
@@ -168,7 +168,7 @@ func RemoveImageContainer() error {
 	ctx := context.Background()
 	log.Printf("Removing docker image '%s'", metabaseImage)
 	if _, err := cli.ImageRemove(ctx, metabaseImage, types.ImageRemoveOptions{}); err != nil {
-		return fmt.Errorf("failed remove image container %s : %s", metabaseImage, err)
+		return fmt.Errorf("failed to remove image container %s : %s", metabaseImage, err)
 	}
 	return nil
 }

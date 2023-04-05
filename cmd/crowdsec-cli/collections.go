@@ -3,11 +3,11 @@ package main
 import (
 	"fmt"
 
-	"github.com/crowdsecurity/crowdsec/pkg/cwhub"
-
+	"github.com/fatih/color"
 	log "github.com/sirupsen/logrus"
-
 	"github.com/spf13/cobra"
+
+	"github.com/crowdsecurity/crowdsec/pkg/cwhub"
 )
 
 func NewCollectionsCmd() *cobra.Command {
@@ -21,19 +21,19 @@ func NewCollectionsCmd() *cobra.Command {
 		DisableAutoGenTag: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if err := csConfig.LoadHub(); err != nil {
-				log.Fatalf(err.Error())
+				log.Fatal(err)
 			}
 			if csConfig.Hub == nil {
 				return fmt.Errorf("you must configure cli before interacting with hub")
 			}
 
-			if err := setHubBranch(); err != nil {
+			if err := cwhub.SetHubBranch(); err != nil {
 				return fmt.Errorf("error while setting hub branch: %s", err)
 			}
 
 			if err := cwhub.GetHubIdx(csConfig.Hub); err != nil {
+				log.Info("Run 'sudo cscli hub update' to get the hub index")
 				log.Fatalf("Failed to get Hub index : %v", err)
-				log.Infoln("Run 'sudo cscli hub update' to get the hub index")
 			}
 
 			return nil
@@ -59,12 +59,17 @@ func NewCollectionsCmd() *cobra.Command {
 		DisableAutoGenTag: true,
 		Run: func(cmd *cobra.Command, args []string) {
 			for _, name := range args {
+				t := cwhub.GetItem(cwhub.COLLECTIONS, name)
+				if t == nil {
+					nearestItem, score := GetDistance(cwhub.COLLECTIONS, name)
+					Suggest(cwhub.COLLECTIONS, name, nearestItem.Name, score, ignoreError)
+					continue
+				}
 				if err := cwhub.InstallItem(csConfig, name, cwhub.COLLECTIONS, forceAction, downloadOnly); err != nil {
-					if ignoreError {
-						log.Errorf("Error while installing '%s': %s", name, err)
-					} else {
+					if !ignoreError {
 						log.Fatalf("Error while installing '%s': %s", name, err)
 					}
+					log.Errorf("Error while installing '%s': %s", name, err)
 				}
 			}
 		},
@@ -91,7 +96,7 @@ func NewCollectionsCmd() *cobra.Command {
 			}
 
 			if len(args) == 0 {
-				log.Fatalf("Specify at least one collection to remove or '--all' flag.")
+				log.Fatal("Specify at least one collection to remove or '--all' flag.")
 			}
 
 			for _, name := range args {
@@ -168,7 +173,7 @@ func NewCollectionsCmd() *cobra.Command {
 		Args:              cobra.ExactArgs(0),
 		DisableAutoGenTag: true,
 		Run: func(cmd *cobra.Command, args []string) {
-			ListItems([]string{cwhub.COLLECTIONS}, args, false, true, all)
+			ListItems(color.Output, []string{cwhub.COLLECTIONS}, args, false, true, all)
 		},
 	}
 	cmdCollectionsList.PersistentFlags().BoolVarP(&all, "all", "a", false, "List disabled items as well")

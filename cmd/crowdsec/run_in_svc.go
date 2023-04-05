@@ -4,24 +4,29 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
-	"github.com/confluentinc/bincover"
-	"github.com/crowdsecurity/crowdsec/pkg/csconfig"
-	"github.com/crowdsecurity/crowdsec/pkg/cwversion"
-	"github.com/crowdsecurity/crowdsec/pkg/types"
 	log "github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/writer"
+
+	"github.com/crowdsecurity/crowdsec/pkg/csconfig"
+	"github.com/crowdsecurity/crowdsec/pkg/cwversion"
+	"github.com/crowdsecurity/crowdsec/pkg/database"
+	"github.com/crowdsecurity/crowdsec/pkg/types"
 )
 
-func StartRunSvc() {
-
+func StartRunSvc() error {
 	var (
 		cConfig *csconfig.Config
 		err     error
 	)
 
-	log.AddHook(&writer.Hook{ // Send logs with level higher than warning to stderr
+	defer types.CatchPanic("crowdsec/StartRunSvc")
+
+	// Set a default logger with level=fatal on stderr,
+	// in addition to the one we configure afterwards
+	log.AddHook(&writer.Hook{
 		Writer: os.Stderr,
 		LogLevels: []log.Level{
 			log.PanicLevel,
@@ -29,37 +34,29 @@ func StartRunSvc() {
 		},
 	})
 
-	cConfig, err = csconfig.NewConfig(flags.ConfigFile, flags.DisableAgent, flags.DisableAPI)
-	if err != nil {
-		log.Fatalf(err.Error())
-	}
-	if err := LoadConfig(cConfig); err != nil {
-		log.Fatalf(err.Error())
-	}
-	// Configure logging
-	if err = types.SetDefaultLoggerConfig(cConfig.Common.LogMedia, cConfig.Common.LogDir, *cConfig.Common.LogLevel,
-		cConfig.Common.LogMaxSize, cConfig.Common.LogMaxFiles, cConfig.Common.LogMaxAge, cConfig.Common.CompressLogs); err != nil {
-		log.Fatal(err.Error())
+	if cConfig, err = LoadConfig(flags.ConfigFile, flags.DisableAgent, flags.DisableAPI, false); err != nil {
+		return err
 	}
 
 	log.Infof("Crowdsec %s", cwversion.VersionStr())
 
+	apiReady := make(chan bool, 1)
+	agentReady := make(chan bool, 1)
+
 	// Enable profiling early
 	if cConfig.Prometheus != nil {
-		go registerPrometheus(cConfig.Prometheus)
-	}
+		var dbClient *database.Client
+		var err error
 
-	if exitCode, err := Serve(cConfig); err != nil {
-		if err != nil {
-			// this method of logging a fatal error does not
-			// trigger a program exit (as stated by the authors, it
-			// is not going to change in logrus to keep backward
-			// compatibility), and allows us to report coverage.
-			log.NewEntry(log.StandardLogger()).Log(log.FatalLevel, err)
-			if !bincoverTesting {
-				os.Exit(exitCode)
+		if cConfig.DbConfig != nil {
+			dbClient, err = database.NewClient(cConfig.DbConfig)
+
+			if err != nil {
+				return fmt.Errorf("unable to create database client: %s", err)
 			}
-			bincover.ExitCode = exitCode
 		}
+		registerPrometheus(cConfig.Prometheus)
+		go servePrometheus(cConfig.Prometheus, dbClient, apiReady, agentReady)
 	}
+	return Serve(cConfig, apiReady, agentReady)
 }

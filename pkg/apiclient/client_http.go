@@ -59,6 +59,9 @@ func (c *ApiClient) Do(ctx context.Context, req *http.Request, v interface{}) (*
 		req.Header.Add("User-Agent", c.UserAgent)
 	}
 
+	if log.GetLevel() >= log.DebugLevel {
+		log.Debugf("[URL] %s %s", req.Method, req.URL)
+	}
 	resp, err := c.client.Do(req)
 	if resp != nil && resp.Body != nil {
 		defer resp.Body.Close()
@@ -103,17 +106,15 @@ func (c *ApiClient) Do(ctx context.Context, req *http.Request, v interface{}) (*
 	}
 
 	if v != nil {
-		if w, ok := v.(io.Writer); ok {
-			io.Copy(w, resp.Body)
-		} else {
+		w, ok := v.(io.Writer)
+		if !ok {
 			decErr := json.NewDecoder(resp.Body).Decode(v)
-			if decErr == io.EOF {
+			if errors.Is(decErr, io.EOF) {
 				decErr = nil // ignore EOF errors caused by empty response body
 			}
-			if decErr != nil {
-				err = decErr
-			}
+			return response, decErr
 		}
+		io.Copy(w, resp.Body)
 	}
 	return response, err
 }
