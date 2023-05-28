@@ -19,9 +19,8 @@ require (
 	github.com/crowdsecurity/grokky v0.0.0-20220120093523-d5b3478363fa
 	github.com/crowdsecurity/machineid v1.0.2
 	github.com/davecgh/go-spew v1.1.1
-	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/dghubble/sling v1.3.0
-	github.com/docker/docker v20.10.2+incompatible
+	github.com/docker/docker v20.10.24+incompatible
 	github.com/docker/go-connections v0.4.0
 	github.com/enescakir/emoji v1.0.0
 	github.com/fatih/color v1.13.0
@@ -71,6 +70,7 @@ require (
 require (
 	github.com/beevik/etree v1.1.0
 	github.com/google/winops v0.0.0-20211216095627-f0e86eb1453b
+	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58
 	golang.org/x/sys v0.0.0-20220513210249-45d2b4557a2a
 )
 
@@ -86,7 +86,6 @@ require (
 	github.com/asaskevich/govalidator v0.0.0-20200907205600-7a23bdc65eef // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.1.2 // indirect
-	github.com/containerd/containerd v1.6.2 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.1 // indirect
 	github.com/creack/pty v1.1.11 // indirect
 	github.com/docker/distribution v2.7.1+incompatible // indirect
@@ -108,7 +107,6 @@ require (
 	github.com/golang/glog v0.0.0-20210429001901-424d2337a529 // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/google/go-cmp v0.5.7 // indirect
-	github.com/gorilla/mux v1.7.3 // indirect
 	github.com/hashicorp/hcl/v2 v2.11.1 // indirect
 	github.com/hashicorp/yamux v0.0.0-20180604194846-3520598351bb // indirect
 	github.com/huandu/xstrings v1.3.2 // indirect
@@ -144,7 +142,6 @@ require (
 	github.com/oklog/run v1.0.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.0.2-0.20211117181255-693428a734f5 // indirect
-	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/common v0.30.0 // indirect
 	github.com/prometheus/procfs v0.7.3 // indirect
@@ -162,6 +159,7 @@ require (
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c // indirect
 	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211 // indirect
 	golang.org/x/text v0.3.7 // indirect
+	golang.org/x/time v0.0.0-20210723032227-1f47c861a9ac // indirect
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/genproto v0.0.0-20220414192740-2d67ff6cf2b4 // indirect
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
